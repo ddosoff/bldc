@@ -66,10 +66,8 @@ typedef enum
 	MANUAL_SLOW,			   // Constant speed mode with positive current
 	MANUAL_SLOW_BACK_SPEED_UP, // Speed up until manual constant speed in negative current
 	MANUAL_SLOW_BACK,		   // Constant speed mode with negative current
-#ifdef DEBUG_SMOOTH_MOTOR
-	MANUAL_DEBUG_SMOOTH, // Debug smooth motor movements with 'smooth' terminal commands
-#endif
-	DISCONNECTED, // UI only state
+	MANUAL_DEBUG_SMOOTH,       // Debug smooth motor movements with 'smooth' terminal commands
+	DISCONNECTED,              // UI only state
 } skypuff_state;
 
 // Winch settings
@@ -192,10 +190,10 @@ inline const char *state_str(const skypuff_state s)
 		return "PULL";
 	case FAST_PULL:
 		return "FAST_PULL";
-#ifdef DEBUG_SMOOTH_MOTOR
 	case MANUAL_DEBUG_SMOOTH:
 		return "MANUAL_DEBUG_SMOOTH";
-#endif
+	case DISCONNECTED:
+		return "DISCONNECTED";
 	default:
 		return "UNKNOWN";
 	}

@@ -111,6 +111,7 @@ static void terminal_alive(int argc, const char **argv);
 static void terminal_set_state(int argc, const char **argv);
 static void terminal_set_pull_force(int argc, const char **argv);
 static void terminal_adc2_tick(int argc, const char **argv);
+static void terminal_measure_spool(int argc, const char **argv);
 #ifdef DEBUG_SMOOTH_MOTOR
 static void terminal_smooth(int argc, const char **argv);
 #endif
@@ -185,9 +186,7 @@ typedef enum
 	SEND_CONF,
 	SEND_POWER_STATS,
 	SEND_TEMP_STATS,
-#ifdef DEBUG_SMOOTH_MOTOR
 	SET_SMOOTH,
-#endif
 } skypuff_terminal_command;
 
 static volatile skypuff_terminal_command terminal_command;
@@ -205,9 +204,8 @@ typedef struct
 
 static smooth_motor_state current_motor_state;
 static smooth_motor_state target_motor_state;
-#ifdef DEBUG_SMOOTH_MOTOR
 static smooth_motor_state terminal_motor_state;
-#endif
+
 static int next_smooth_motor_adjustment; // Loop count for next motor adjustment
 static int prev_smooth_motor_adjustment; // Loop count of previous motor adjustment
 static float amps_per_sec;				 // Speed to change force during smooth motor adjustments, calculated
@@ -1649,6 +1647,10 @@ void app_custom_start(void)
 		"adc2_tick",
 		"Cut the rope with guillotine",
 		"", terminal_adc2_tick);
+	terminal_register_command_callback(
+		"measure_spool",
+		"Measure spool virtual mass spinning motor backward and forward with specified force during specified time and measurments with specified interval",
+		"[force (kg)] [apply time (seconds)] [measurment interval (milliseconds)]", terminal_measure_spool);
 
 #ifdef DEBUG_SMOOTH_MOTOR
 	terminal_register_command_callback(
@@ -2252,7 +2254,6 @@ inline static void process_states(const int cur_tac, const int abs_tac)
 		print_position_periodically(cur_tac, long_print_delay, "");
 #endif
 		break;
-#ifdef DEBUG_SMOOTH_MOTOR
 	case MANUAL_DEBUG_SMOOTH:
 		// No system timeouts on this state
 		if (!(loop_step % timeout_reset_interval))
@@ -2260,7 +2261,6 @@ inline static void process_states(const int cur_tac, const int abs_tac)
 
 		print_position_periodically(cur_tac, long_print_delay, "");
 		break;
-#endif
 	default:
 		commands_printf("SkyPUFF: unknown control loop state, exiting!");
 		stop_now = true;
@@ -2649,7 +2649,6 @@ inline static void process_terminal_commands(int *cur_tac, int *abs_tac)
 		}
 
 		break;
-#ifdef DEBUG_SMOOTH_MOTOR
 	case SET_SMOOTH:
 		state = MANUAL_DEBUG_SMOOTH;
 
@@ -2673,7 +2672,6 @@ inline static void process_terminal_commands(int *cur_tac, int *abs_tac)
 		}
 
 		break;
-#endif
 	default:
 		commands_printf("SkyPUFF: unknown terminal command, exiting!");
 		stop_now = true;
@@ -3252,4 +3250,124 @@ void terminal_adc2_tick(int argc, const char **argv)
 		palClearPad(HW_ADC_EXT2_GPIO, HW_ADC_EXT2_PIN);
 		chThdSleepMilliseconds(delay);
 	}
+}
+
+void draw_spool_mass_graph(int *t, int ms, float kg, int interval_ms)
+{
+	prev_erpm = mc_interface_get_rpm();
+
+	for(int i = 0; i < ms; i+= interval_ms, (*t) += interval_ms) {
+		int n = 0; // Graph number
+
+		chThdSleepMilliseconds(interval_ms);
+
+		float cur_erpm = mc_interface_get_rpm();
+
+		// Speed ufiltered (m/s)
+		commands_plot_set_graph(n++);
+		commands_send_plot_points((float)(*t) / 1000, erpm_to_ms(cur_erpm));
+
+		// Acceleration (m/s^2)
+		commands_plot_set_graph(n++);
+		float acceleration_mss = erpm_to_ms(cur_erpm - prev_erpm) * (1000 / interval_ms);
+		commands_send_plot_points((float)(*t) / 1000, acceleration_mss);
+
+		// Mass (kg) 
+		// F = ma, m = F / a
+
+		if(fabs(acceleration_mss) > (double)0.5) {
+			commands_plot_set_graph(n++);
+			commands_send_plot_points((float)(*t) / 1000, kg / acceleration_mss);
+		}
+
+		prev_erpm = cur_erpm;
+	}
+}
+
+void terminal_measure_spool(int argc, const char **argv)
+{
+	float kg = 1, secs = 2;
+	int interval_ms;
+
+	if (argc < 4)
+	{
+		commands_printf("%s: -- Command requires at least three arguments (kg, seconds, milliseconds) -- For example: 'measure_spool 5 3 10'",
+						state_str(state));
+		return;
+	}
+
+	if (sscanf(argv[1], "%f", &kg) == EOF)
+	{
+		commands_printf("%s: -- Can't parse '%s' as kg value.",
+						state_str(state), argv[1]);
+		return;
+	};
+
+	if (sscanf(argv[2], "%f", &secs) == EOF)
+	{
+		commands_printf("%s: -- Can't parse '%s' as seconds value.",
+						state_str(state), argv[2]);
+		return;
+	};
+
+	if (sscanf(argv[3], "%d", &interval_ms) == EOF)
+	{
+		commands_printf("%s: -- Can't parse '%s' as interval value.",
+						state_str(state), argv[3]);
+		return;
+	};
+
+
+	if(state == UNINITIALIZED) {
+		commands_printf("%s: -- Can't measure spool in UNITIALIZED state!", state_str(state));
+		return;
+	}
+
+	// Set alive during our tests
+	alive_inc = (secs + 1) * 2000;
+	chThdSleepMilliseconds(5);
+
+	float amps = kg * config.amps_per_kg;
+
+	// Release motor
+	terminal_command = SET_SMOOTH;
+	terminal_motor_state.mode = MOTOR_RELEASED;
+	terminal_motor_state.param.current = 0;
+
+	chThdSleepMilliseconds(5);
+	
+	if(state != MANUAL_DEBUG_SMOOTH) {
+		commands_printf("%s: -- Can't set MANUAL_DEBUG_SMOOTH state!", state_str(state));
+		return;
+	}
+
+	commands_init_plot("Seconds", "Speed");
+	commands_plot_add_graph("Speed unfiltered (m/s)");
+	commands_plot_add_graph("Acceleration (m/s^2)");
+	commands_plot_add_graph("Virtual spool mass (kg)");
+
+	commands_printf("%s: -- Running backward with %.2fkg (%.1fA) force during %.2fsecs, interval %dms...", 
+					state_str(state), 
+					(double)kg, (double)(-amps), (double)secs, interval_ms);
+
+	timeout_reset();
+	mc_interface_set_current(-amps);
+
+	int time_ms = 0;
+	draw_spool_mass_graph(&time_ms, secs * 1000, kg, interval_ms);
+
+
+	commands_printf("%s: -- Running forard with %.2fkg (%.1fA) force during %.2fsecs, interval %dms...", 
+					state_str(state), 
+					(double)kg, (double)amps, (double)secs, interval_ms);
+	mc_interface_set_current(amps);
+	draw_spool_mass_graph(&time_ms, secs * 1000, kg, interval_ms);
+
+	mc_interface_release_motor();
+
+	// Setting MANUAL_BRACKING safe state
+	terminal_command = SET_MANUAL_BRAKING;
+	chThdSleepMilliseconds(5);
+	commands_printf("%s: -- Measure done! Checkout graphs in 'Realtime Data' - 'Experiment'", state_str(state));
+
 }
