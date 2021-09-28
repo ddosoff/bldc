@@ -3252,6 +3252,7 @@ void terminal_adc2_tick(int argc, const char **argv)
 	}
 }
 
+const float speed_filter_period_s = 0.02; // 20ms tac speed filter
 struct {
 	systime_t time;
 	float speed_ms;
@@ -3259,7 +3260,27 @@ struct {
 
 	int tac;
 	float speed_tac_ms;
+	float acceleration_tac_mss;
+
+	float filtered_speed_tac_ms;
+	float filtered_acceleration_tac_mss;	
 } spool_measurement;
+
+/*
+// Number of speed measurements to average
+const int AVG_SPEEDS = 6;
+
+struct speeds_at_time {
+	systime_t time;
+	float speed;
+};
+
+struct Averager {
+	speed_at_time speeds[AVG_SPEEDS];
+	int head, tail;
+
+}
+*/
 
 // Some missing ChibiOS time managment types and functions
 typedef systime_t sysinterval_t;
@@ -3280,26 +3301,39 @@ void spool_measurement_init(void)
 
 	spool_measurement.tac = mc_interface_get_tachometer_value(false);
 	spool_measurement.speed_tac_ms = 0;
+	spool_measurement.acceleration_tac_mss = 0;
+
+	spool_measurement.filtered_speed_tac_ms = 0;
+	spool_measurement.filtered_acceleration_tac_mss = 0;
+
 }
 
 
 static inline void spool_measurement_tick(void)
 {
 	systime_t cur_time = chVTGetSystemTime();
-	float cur_speed_ms = erpm_to_ms(mc_interface_get_rpm());
-	sysinterval_t delayI = chTimeDiffX(spool_measurement.time, cur_time);
+	int cur_tac = mc_interface_get_tachometer_value(false);
 
+	sysinterval_t delayI = chTimeDiffX(spool_measurement.time, cur_time);
 	float delayS = (float)delayI / (float)CH_CFG_ST_FREQUENCY;
 
-	spool_measurement.acceleration_mss = (cur_speed_ms - spool_measurement.speed_ms) / delayS;
-	spool_measurement.speed_ms = cur_speed_ms;
-	spool_measurement.time = cur_time;
-
 	// Tachometer speed
-	int cur_tac = mc_interface_get_tachometer_value(false);
 	int tac_diff = cur_tac - spool_measurement.tac;
-	spool_measurement.speed_tac_ms = tac_steps_to_meters(tac_diff) / delayS;
+
+	float cur_speed_tac_ms = tac_steps_to_meters(tac_diff) / delayS;
+
+	float avgK = delayS / speed_filter_period_s;
+	float prev_filtered_speed_tac_ms = spool_measurement.filtered_speed_tac_ms;
+	UTILS_LP_FAST(spool_measurement.filtered_speed_tac_ms, (cur_speed_tac_ms + spool_measurement.speed_tac_ms) / 2, avgK);
+	
+	float cur_acceleration_tac_mss = (spool_measurement.filtered_speed_tac_ms - prev_filtered_speed_tac_ms) / delayS * 0.2;
+	UTILS_LP_FAST(spool_measurement.filtered_acceleration_tac_mss, (cur_acceleration_tac_mss + spool_measurement.acceleration_tac_mss) / 2, avgK);
+
+	spool_measurement.time = cur_time;
 	spool_measurement.tac = cur_tac;
+	spool_measurement.speed_tac_ms = cur_speed_tac_ms;
+	spool_measurement.acceleration_tac_mss = cur_acceleration_tac_mss;
+
 }
 
 void draw_spool_mass_graph(systime_t started, int drawing_ms, float kg, int interval_ms)
@@ -3331,23 +3365,32 @@ void draw_spool_mass_graph(systime_t started, int drawing_ms, float kg, int inte
 		int n = 0; // Graph number
 
 		// Speed unfiltered (m/s)
-		commands_plot_set_graph(n++);
-		commands_send_plot_points(from_startedS, spool_measurement.speed_ms);
+		//commands_plot_set_graph(n++);
+		//commands_send_plot_points(from_startedS, spool_measurement.speed_ms);
 
 		// Speed tachometer (m/s)
 		commands_plot_set_graph(n++);
 		commands_send_plot_points(from_startedS, spool_measurement.speed_tac_ms);
 
-		// Acceleration (m/s^2)
+		// Speed tachometer filtered (m/s)
 		commands_plot_set_graph(n++);
-		commands_send_plot_points(from_startedS, spool_measurement.acceleration_mss);
+		commands_send_plot_points(from_startedS, spool_measurement.filtered_speed_tac_ms);
 
+		// Acceleration tachometer filtered (m/s^2)
+		commands_plot_set_graph(n++);
+		commands_send_plot_points(from_startedS, spool_measurement.filtered_acceleration_tac_mss);
+
+		/*
+		// Acceleration tac (m/s^2)
+		commands_plot_set_graph(n++);
+		commands_send_plot_points(from_startedS, spool_measurement.acceleration_tac_mss);
+        */
 		// Mass (kg) 
 		// F = ma, m = F / a
-		if(fabs(spool_measurement.acceleration_mss) > (double)0.5) {
+		/*if(fabs(spool_measurement.acceleration_mss) > (double)0.5) {
 			commands_plot_set_graph(n++);
 			commands_send_plot_points(from_startedS, kg / spool_measurement.acceleration_mss);
-		}
+		}*/
 	}
 }
 
@@ -3411,8 +3454,9 @@ void terminal_measure_spool(int argc, const char **argv)
 	commands_init_plot("Seconds", "Speed (m/s)");
 	commands_plot_add_graph("Speed unfiltered (m/s)");
 	commands_plot_add_graph("Speed tachometer (m/s)");
-	commands_plot_add_graph("Acceleration (m/s^2)");
-	commands_plot_add_graph("Virtual spool mass (kg)");
+	commands_plot_add_graph("Speed tac filtered (m/s^2)");
+	//commands_plot_add_graph("Acceleration tachometer (m/s^2)");
+	//commands_plot_add_graph("Virtual spool mass (kg)");
 
 	commands_printf("%s: -- Running backward with %.2fkg (%.1fA) force during %.2fsecs, interval %dms...", 
 					state_str(state), 
