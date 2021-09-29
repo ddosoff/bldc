@@ -161,6 +161,25 @@ const int antisex_max_sent_zeroes = 30;
 static int antisex_sent_zeroes;
 #endif
 
+// Antisex acceleration maesurements based on tachometer
+static systime_t measurement_delay = MS2ST(5); // Measure speed based on tachometer value
+static float measurement_speed_filter_period_secs = (float)50.0 / (float)1000.0; // Period of tachometer speed measurements to overage
+
+// Store last tick speed measurements here
+struct {
+	systime_t time; // Last measure system time with 1 / 100000 secs resolution
+
+	int tac;
+	float speed_tac_ms;
+	float acceleration_tac_mss;
+
+	float filtered_speed_tac_ms;
+	float filtered_acceleration_tac_mss;	
+} measurement;
+
+// Missing ChibiOS time types
+typedef systime_t sysinterval_t;
+
 static volatile skypuff_state state; // Readable from commands threads too
 static skypuff_config config;
 static skypuff_config set_config; // Updates from terminal thread
@@ -1534,6 +1553,65 @@ void custom_app_data_handler(unsigned char *data, unsigned int len)
 	}
 }
 
+// Speed measurements based on tachometer value
+//
+// Some ChibiOS missing time functions
+static inline sysinterval_t chTimeDiffX(systime_t start, systime_t end) {
+   return (sysinterval_t)((systime_t)(end - start));
+}
+
+static inline systime_t chTimeAddX(systime_t systime, sysinterval_t interval) {
+     return systime + (systime_t)interval;
+}
+
+static void measurement_init(void)
+{
+	measurement.time = chVTGetSystemTime();
+	measurement.tac = mc_interface_get_tachometer_value(false);
+
+	measurement.speed_tac_ms = 0;
+	measurement.acceleration_tac_mss = 0;
+
+	measurement.filtered_speed_tac_ms = 0;
+	measurement.filtered_acceleration_tac_mss = 0;
+
+}
+
+// Returns current tachometer value each time
+static inline int measurement_tick(void)
+{
+	// Get new values
+	systime_t cur_time = chVTGetSystemTime();
+	int cur_tac = mc_interface_get_tachometer_value(false);
+
+	sysinterval_t delayI = chTimeDiffX(measurement.time, cur_time);
+
+	if(delayI < measurement_delay)
+		return cur_tac;
+
+	float delayS = (float)delayI / (float)CH_CFG_ST_FREQUENCY;
+
+	// Tachometer speed
+	int tac_diff = cur_tac - measurement.tac;
+
+	float cur_speed_tac_ms = tac_steps_to_meters(tac_diff) / delayS;
+
+	float avgK = delayS / measurement_speed_filter_period_secs;
+	float prev_filtered_speed_tac_ms = measurement.filtered_speed_tac_ms;
+	UTILS_LP_FAST(measurement.filtered_speed_tac_ms, (cur_speed_tac_ms + measurement.speed_tac_ms) / 2, avgK);
+	
+	float cur_acceleration_tac_mss = (measurement.filtered_speed_tac_ms - prev_filtered_speed_tac_ms) / delayS;
+	UTILS_LP_FAST(measurement.filtered_acceleration_tac_mss, (cur_acceleration_tac_mss + measurement.acceleration_tac_mss) / 2, avgK);
+
+	measurement.time = cur_time;
+	measurement.tac = cur_tac;
+	measurement.speed_tac_ms = cur_speed_tac_ms;
+	measurement.acceleration_tac_mss = cur_acceleration_tac_mss;
+
+	return cur_tac;
+}
+
+
 static void antisex_init(void)
 {
 	antisex_erpm_filtered = mc_interface_get_rpm();
@@ -1597,6 +1675,7 @@ void app_custom_start(void)
 	// Update smooth speed for current pull
 	smooth_calculate_new_speed();
 
+	measurement_init();
 	antisex_init();
 
 	// Check system drive settings and our config for limits
@@ -2917,7 +2996,7 @@ static THD_FUNCTION(my_thread, arg)
 			return;
 		}
 
-		int cur_tac = mc_interface_get_tachometer_value(false);
+		int cur_tac = measurement_tick(); // Measure speed and acceleration based on tachometer values also
 		int abs_tac = abs(cur_tac);
 
 		// terminal command 'alive'?
@@ -3252,156 +3331,55 @@ void terminal_adc2_tick(int argc, const char **argv)
 	}
 }
 
-const float speed_filter_period_s = 0.02; // 20ms tac speed filter
-struct {
-	systime_t time;
-	float speed_ms;
-	float acceleration_mss;
 
-	int tac;
-	float speed_tac_ms;
-	float acceleration_tac_mss;
-
-	float filtered_speed_tac_ms;
-	float filtered_acceleration_tac_mss;	
-} spool_measurement;
-
-/*
-// Number of speed measurements to average
-const int AVG_SPEEDS = 6;
-
-struct speeds_at_time {
-	systime_t time;
-	float speed;
-};
-
-struct Averager {
-	speed_at_time speeds[AVG_SPEEDS];
-	int head, tail;
-
-}
-*/
-
-// Some missing ChibiOS time managment types and functions
-typedef systime_t sysinterval_t;
-
-static inline sysinterval_t chTimeDiffX(systime_t start, systime_t end) {
-   return (sysinterval_t)((systime_t)(end - start));
-}
-
-static inline systime_t chTimeAddX(systime_t systime, sysinterval_t interval) {
-     return systime + (systime_t)interval;
-}
-
-void spool_measurement_init(void)
+void draw_spool_mass_graph(systime_t started, int drawing_ms, float kg)
 {
-	spool_measurement.time = chVTGetSystemTime();
-	spool_measurement.speed_ms = erpm_to_ms(mc_interface_get_rpm());
-	spool_measurement.acceleration_mss = 0;
-
-	spool_measurement.tac = mc_interface_get_tachometer_value(false);
-	spool_measurement.speed_tac_ms = 0;
-	spool_measurement.acceleration_tac_mss = 0;
-
-	spool_measurement.filtered_speed_tac_ms = 0;
-	spool_measurement.filtered_acceleration_tac_mss = 0;
-
-}
-
-
-static inline void spool_measurement_tick(void)
-{
-	systime_t cur_time = chVTGetSystemTime();
-	int cur_tac = mc_interface_get_tachometer_value(false);
-
-	sysinterval_t delayI = chTimeDiffX(spool_measurement.time, cur_time);
-	float delayS = (float)delayI / (float)CH_CFG_ST_FREQUENCY;
-
-	// Tachometer speed
-	int tac_diff = cur_tac - spool_measurement.tac;
-
-	float cur_speed_tac_ms = tac_steps_to_meters(tac_diff) / delayS;
-
-	float avgK = delayS / speed_filter_period_s;
-	float prev_filtered_speed_tac_ms = spool_measurement.filtered_speed_tac_ms;
-	UTILS_LP_FAST(spool_measurement.filtered_speed_tac_ms, (cur_speed_tac_ms + spool_measurement.speed_tac_ms) / 2, avgK);
-	
-	float cur_acceleration_tac_mss = (spool_measurement.filtered_speed_tac_ms - prev_filtered_speed_tac_ms) / delayS * 0.2;
-	UTILS_LP_FAST(spool_measurement.filtered_acceleration_tac_mss, (cur_acceleration_tac_mss + spool_measurement.acceleration_tac_mss) / 2, avgK);
-
-	spool_measurement.time = cur_time;
-	spool_measurement.tac = cur_tac;
-	spool_measurement.speed_tac_ms = cur_speed_tac_ms;
-	spool_measurement.acceleration_tac_mss = cur_acceleration_tac_mss;
-
-}
-
-void draw_spool_mass_graph(systime_t started, int drawing_ms, float kg, int interval_ms)
-{
-	sysinterval_t measurment_period = MS2ST(interval_ms);
-	
 	systime_t cur_time = chVTGetSystemTime();
 	systime_t end_time = chTimeAddX(cur_time, MS2ST(drawing_ms));
+	systime_t last_measurement_time = 0;
 
-	while(true) {
-		cur_time = chVTGetSystemTime();
+	while(chVTGetSystemTime() < end_time) {
+		if(last_measurement_time != measurement.time) {
+			last_measurement_time = measurement.time;
 
-		if(cur_time >= end_time)
-			break;
+			sysinterval_t from_startedI = chTimeDiffX(started, measurement.time);
 
-		systime_t good_measure_time = chTimeAddX(spool_measurement.time, measurment_period);
-		if(good_measure_time > cur_time)
-			chThdSleep(good_measure_time - cur_time);
-		else
-			chThdYield();
+			// Convert to microseconds cause overflow, so convert in serial way
+			float from_startedS = (float)from_startedI / (float)CH_CFG_ST_FREQUENCY;
 
-		spool_measurement_tick();
+			int n = 0; // Graph number
 
-		sysinterval_t from_startedI = chTimeDiffX(started, spool_measurement.time);
-
-		// Convert to microseconds cause overflow, so convert in serial way
-		float from_startedS = (float)from_startedI / (float)CH_CFG_ST_FREQUENCY;
-
-		int n = 0; // Graph number
-
-		// Speed unfiltered (m/s)
-		//commands_plot_set_graph(n++);
-		//commands_send_plot_points(from_startedS, spool_measurement.speed_ms);
-
-		// Speed tachometer (m/s)
-		commands_plot_set_graph(n++);
-		commands_send_plot_points(from_startedS, spool_measurement.speed_tac_ms);
-
-		// Speed tachometer filtered (m/s)
-		commands_plot_set_graph(n++);
-		commands_send_plot_points(from_startedS, spool_measurement.filtered_speed_tac_ms);
-
-		// Acceleration tachometer filtered (m/s^2)
-		commands_plot_set_graph(n++);
-		commands_send_plot_points(from_startedS, spool_measurement.filtered_acceleration_tac_mss);
-
-		/*
-		// Acceleration tac (m/s^2)
-		commands_plot_set_graph(n++);
-		commands_send_plot_points(from_startedS, spool_measurement.acceleration_tac_mss);
-        */
-		// Mass (kg) 
-		// F = ma, m = F / a
-		/*if(fabs(spool_measurement.acceleration_mss) > (double)0.5) {
+			// Speed tachometer (m/s)
 			commands_plot_set_graph(n++);
-			commands_send_plot_points(from_startedS, kg / spool_measurement.acceleration_mss);
-		}*/
-	}
+			commands_send_plot_points(from_startedS, measurement.speed_tac_ms);
+
+			// Speed tachometer filtered (m/s)
+			commands_plot_set_graph(n++);
+			commands_send_plot_points(from_startedS, measurement.filtered_speed_tac_ms);
+
+			// Acceleration tachometer filtered (m/s^2)
+			commands_plot_set_graph(n++);
+			commands_send_plot_points(from_startedS, measurement.filtered_acceleration_tac_mss);
+
+			// Mass (kg) 
+			// F = ma, m = F / a
+			if(fabs(measurement.filtered_acceleration_tac_mss) > 1) {
+				commands_plot_set_graph(n++);
+				commands_send_plot_points(from_startedS, kg / measurement.filtered_acceleration_tac_mss);
+			}
+		}
+
+		chThdSleepMilliseconds(1);
+	} 
 }
 
 void terminal_measure_spool(int argc, const char **argv)
 {
 	float kg = 1, secs = 2;
-	int interval_ms;
 
 	if (argc < 4)
 	{
-		commands_printf("%s: -- Command requires at least three arguments (kg, seconds, milliseconds) -- For example: 'measure_spool 5 3 10'",
+		commands_printf("%s: -- Command requires at least two arguments (kg, seconds) -- For example: 'measure_spool 5 3'",
 						state_str(state));
 		return;
 	}
@@ -3419,14 +3397,6 @@ void terminal_measure_spool(int argc, const char **argv)
 						state_str(state), argv[2]);
 		return;
 	};
-
-	if (sscanf(argv[3], "%d", &interval_ms) == EOF)
-	{
-		commands_printf("%s: -- Can't parse '%s' as interval value.",
-						state_str(state), argv[3]);
-		return;
-	};
-
 
 	if(state == UNINITIALIZED) {
 		commands_printf("%s: -- Can't measure spool in UNITIALIZED state!", state_str(state));
@@ -3454,29 +3424,22 @@ void terminal_measure_spool(int argc, const char **argv)
 	commands_init_plot("Seconds", "Speed (m/s)");
 	commands_plot_add_graph("Speed unfiltered (m/s)");
 	commands_plot_add_graph("Speed tachometer (m/s)");
-	commands_plot_add_graph("Speed tac filtered (m/s^2)");
-	//commands_plot_add_graph("Acceleration tachometer (m/s^2)");
-	//commands_plot_add_graph("Virtual spool mass (kg)");
+	commands_plot_add_graph("Acceleration tachometer filtered (m/s^2)");
+	commands_plot_add_graph("Virtual spool mass (kg)");
 
-	commands_printf("%s: -- Running backward with %.2fkg (%.1fA) force during %.2fsecs, interval %dms...", 
+	commands_printf("%s: -- Running backward and forward with %.2fkg (%.1fA) force during %.2fsecs...", 
 					state_str(state), 
-					(double)kg, (double)(-amps), (double)secs, interval_ms);
+					(double)kg, (double)(-amps), (double)secs);
 
 	timeout_reset();
-	mc_interface_set_current(-amps);
 
 	systime_t started = chVTGetSystemTime();
-	spool_measurement_init();
 
-	draw_spool_mass_graph(started, secs * 1000, kg, interval_ms);
+	mc_interface_set_current(-amps);
+	draw_spool_mass_graph(started, secs * 1000, kg);
 
-
-	commands_printf("%s: -- Running forard with %.2fkg (%.1fA) force during %.2fsecs, interval %dms...", 
-					state_str(state), 
-					(double)kg, (double)amps, (double)secs, interval_ms);
 	mc_interface_set_current(amps);
-
-	draw_spool_mass_graph(started, secs * 1000, kg, interval_ms);
+	draw_spool_mass_graph(started, secs * 1500, kg);
 
 	mc_interface_release_motor();
 
