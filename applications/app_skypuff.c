@@ -40,12 +40,7 @@
 #include <string.h>
 #include <ctype.h>
 
-// Uncomment to enable debugging terminal prints
 //#define DEBUG_SMOOTH_MOTOR
-// Send experiment graphs to Vesc Tool - Realtime Data - Experiment
-//#define DEBUG_ANTISEX
-//#define DEBUG_ANTISEX_INTEGRAL
-//#define DEBUG_ANTISEX_BORDERS
 //#define VERBOSE_TERMINAL
 
 #include "app_skypuff.h"
@@ -138,36 +133,17 @@ static bool is_fan_active;		 // AUX_ON?
 // Prevent long time oscilations
 // Long rope in the air works like a big spring
 // and cause long time oscilations together with paraglider
-#define antisex_measure_delay 3 // Measured in loop steps
-#define antisex_erpm_filtering_steps 10
-const float antisex_erpm_filtering_k = 0.1;
-const float antisex_acceleration_time_k = (float)1000.0 / (float)(antisex_erpm_filtering_steps * antisex_measure_delay);
-const int antisex_measure_steps = 2; // I did some tests, works better on 2 steps then 1 step
+static float antisex_amps;	          // Force additive value to prevent oscilations
+static float antisex_amps_gain;       // Force gain
+static systime_t antisex_start_time;  // Point in time when pull reduce activated
 
-static float antisex_amps;		// Force additive value to prevent oscilations
-static float antisex_amps_gain; // Force gain
-static float antisex_erpm_filtered;
-static float antisex_erpm_prev_filtered;
-static float antisex_acceleration_prev;
-static float antisex_acceleration_integral;
-static int antisex_erpm_filtering_step;
-static int antisex_reduce_step;
-static int antisex_measure_step;
-
-static float antisex_deceleration_sign;
-static float antisex_acceleration_before_reduce;
-#ifdef DEBUG_ANTISEX
-const int antisex_max_sent_zeroes = 30;
-static int antisex_sent_zeroes;
-#endif
-
-// Antisex acceleration maesurements based on tachometer
+// Speed and acceleration maesurements based on tachometer value is more accurate then mc_interface_get_rpm()
 static systime_t measurement_delay = MS2ST(5); // Measure speed based on tachometer value
 static float measurement_speed_filter_period_secs = (float)50.0 / (float)1000.0; // Period of tachometer speed measurements to overage
 
-// Store last tick speed measurements here
+// Store tachometer based speed measurements here
 struct {
-	systime_t time; // Last measure system time with 1 / 100000 secs resolution
+	systime_t time;
 
 	int tac;
 	float speed_tac_ms;
@@ -276,12 +252,11 @@ static const skypuff_config min_config = {
 	.manual_slow_max_current = 0.5,
 	.manual_slow_speed_up_current = 0.5,
 	.manual_slow_erpm = 100,
-	.antisex_starting_integral = 1000,
+	.antisex_min_pull_amps = 0.2,
 	.antisex_reduce_amps = 0.2,
-	.antisex_reduce_steps = 0,
-	.antisex_reduce_amps_per_step = 0,
-	.antisex_unwinding_gain = 0.8,
-	.antisex_gain_speed = -30000,
+	.antisex_acceleration_on_mss = -50,
+	.antisex_acceleration_off_mss = -50,
+	.antisex_max_period_ms = 100,
 	.max_speed_ms = 5,
 };
 
@@ -313,12 +288,11 @@ static const skypuff_config max_config = {
 	.manual_slow_max_current = 50,
 	.manual_slow_speed_up_current = 50,
 	.manual_slow_erpm = 40000,
-	.antisex_starting_integral = 1000000, // Set high to disable antisex
-	.antisex_reduce_amps = 40,			  // Too much can cause strong braking with current spikes
-	.antisex_reduce_steps = 10,
-	.antisex_reduce_amps_per_step = 10, // Be carefull with high amps per step and many steps
-	.antisex_unwinding_gain = 1.2,
-	.antisex_gain_speed = 30000,
+	.antisex_min_pull_amps = 1000,
+	.antisex_reduce_amps = 100,
+	.antisex_acceleration_on_mss = 50,
+	.antisex_acceleration_off_mss = 50,
+	.antisex_max_period_ms = 60000,
 	.max_speed_ms = 300,
 };
 
@@ -855,18 +829,16 @@ static bool is_config_out_of_limits(const skypuff_config *conf)
 								min_config.pre_pull_timeout, max_config.pre_pull_timeout) ||
 		   is_int_out_of_limits("takeoff_period", "milliseconds", conf->takeoff_period,
 								min_config.takeoff_period, max_config.takeoff_period) ||
-		   is_float_out_of_limits("antisex_starting_integral", "ERPM/sec integral", conf->antisex_starting_integral,
-								  min_config.antisex_starting_integral, max_config.antisex_starting_integral) ||
+		   is_pull_out_of_limits("antisex_min_pull_amps", conf->antisex_min_pull_amps,
+								 min_config.antisex_min_pull_amps, max_config.antisex_min_pull_amps) ||
 		   is_pull_out_of_limits("antisex_reduce_amps", conf->antisex_reduce_amps,
 								 min_config.antisex_reduce_amps, max_config.antisex_reduce_amps) ||
-		   is_pull_out_of_limits("antisex_reduce_amps_per_step", conf->antisex_reduce_amps_per_step,
-								 min_config.antisex_reduce_amps_per_step, max_config.antisex_reduce_amps_per_step) ||
-		   is_int_out_of_limits("antisex_reduce_steps", "steps", conf->antisex_reduce_steps,
-								min_config.antisex_reduce_steps, max_config.antisex_reduce_steps) ||
-		   is_float_out_of_limits("antisex_unwinding_gain", "", conf->antisex_unwinding_gain,
-								  min_config.antisex_unwinding_gain, max_config.antisex_unwinding_gain) ||
-		   is_speed_out_of_limits("antisex_gain_speed", conf->antisex_gain_speed,
-								  min_config.antisex_gain_speed, max_config.antisex_gain_speed) ||
+		   is_float_out_of_limits("antisex_acceleration_on_mss", "m/sec^2", conf->antisex_acceleration_on_mss,
+								  min_config.antisex_acceleration_on_mss, max_config.antisex_acceleration_on_mss) ||
+		   is_float_out_of_limits("antisex_acceleration_off_mss", "m/sec^2", conf->antisex_acceleration_off_mss,
+								  min_config.antisex_acceleration_off_mss, max_config.antisex_acceleration_off_mss) ||
+		   is_int_out_of_limits("antisex_max_period_ms", "milliseconds", conf->antisex_max_period_ms,
+								min_config.antisex_max_period_ms, max_config.antisex_max_period_ms) ||
 		   is_float_out_of_limits("max_speed_ms", "ms", conf->max_speed_ms,
 								  min_config.max_speed_ms, max_config.max_speed_ms);
 }
@@ -1212,12 +1184,11 @@ static void set_example_conf(skypuff_config *cfg)
 	cfg->takeoff_period = 5 * 1000;
 
 	// Antisex
-	cfg->antisex_starting_integral = 2000;
+	cfg->antisex_min_pull_amps = 1.5;
 	cfg->antisex_reduce_amps = 1;
-	cfg->antisex_reduce_steps = 2;
-	cfg->antisex_reduce_amps_per_step = 1;
-	cfg->antisex_unwinding_gain = 1.1;
-	cfg->antisex_gain_speed = 500;
+	cfg->antisex_acceleration_on_mss = 7;
+	cfg->antisex_acceleration_off_mss = -0.5;
+	cfg->antisex_max_period_ms = 200;
 
 	// Speed scale limit
 	cfg->max_speed_ms = 20;
@@ -1295,19 +1266,18 @@ inline static void serialize_config(uint8_t *buffer, int32_t *ind)
 	buffer_append_float32_auto(buffer, config.manual_slow_speed_up_current, ind);
 	buffer_append_float32_auto(buffer, config.manual_slow_erpm, ind);
 
-	buffer_append_float32_auto(buffer, config.antisex_starting_integral, ind);
-	buffer_append_float32_auto(buffer, config.antisex_reduce_amps, ind);
-	buffer_append_int32(buffer, config.antisex_reduce_steps, ind);
-	buffer_append_float32_auto(buffer, config.antisex_reduce_amps_per_step, ind);
-	buffer_append_float16(buffer, config.antisex_unwinding_gain, 1e2, ind);
-	buffer_append_float16(buffer, config.antisex_gain_speed, 1, ind);
+	buffer_append_float16(buffer, config.antisex_min_pull_amps, 10, ind);
+	buffer_append_float16(buffer, config.antisex_reduce_amps, 10, ind);
+	buffer_append_float16(buffer, config.antisex_acceleration_on_mss, 1e2, ind);
+	buffer_append_float16(buffer, config.antisex_acceleration_off_mss, 1e2, ind);
+	buffer_append_uint16(buffer, config.antisex_max_period_ms, ind);
 
 	buffer_append_float16(buffer, config.max_speed_ms, 1e2, ind);
 }
 
 inline static bool deserialize_config(unsigned char *data, unsigned int len, skypuff_config *to, int32_t *ind)
 {
-	const int32_t serialized_settings_v1_length = 4 * 30;
+	const int32_t serialized_settings_v1_length = 110;
 
 	int available_bytes = len - *ind;
 	if (available_bytes < serialized_settings_v1_length)
@@ -1347,12 +1317,11 @@ inline static bool deserialize_config(unsigned char *data, unsigned int len, sky
 	to->manual_slow_speed_up_current = buffer_get_float32_auto(data, ind);
 	to->manual_slow_erpm = buffer_get_float32_auto(data, ind);
 
-	to->antisex_starting_integral = buffer_get_float32_auto(data, ind);
-	to->antisex_reduce_amps = buffer_get_float32_auto(data, ind);
-	to->antisex_reduce_steps = buffer_get_int32(data, ind);
-	to->antisex_reduce_amps_per_step = buffer_get_float32_auto(data, ind);
-	to->antisex_unwinding_gain = buffer_get_float16(data, 1e2, ind);
-	to->antisex_gain_speed = buffer_get_float16(data, 1, ind);
+	to->antisex_min_pull_amps = buffer_get_float16(data, 10, ind);
+	to->antisex_reduce_amps = buffer_get_float16(data, 10, ind);
+	to->antisex_acceleration_on_mss = buffer_get_float16(data, 1e2, ind);
+	to->antisex_acceleration_off_mss = buffer_get_float16(data, 1e2, ind);
+	to->antisex_max_period_ms = buffer_get_uint16(data, ind);
 
 	to->max_speed_ms = buffer_get_float16(data, 1e2, ind);
 
@@ -1578,16 +1547,14 @@ static void measurement_init(void)
 }
 
 // Returns current tachometer value each time
-static inline int measurement_tick(void)
+static inline bool measurement_tick(int cur_tac)
 {
 	// Get new values
 	systime_t cur_time = chVTGetSystemTime();
-	int cur_tac = mc_interface_get_tachometer_value(false);
-
 	sysinterval_t delayI = chTimeDiffX(measurement.time, cur_time);
 
 	if(delayI < measurement_delay)
-		return cur_tac;
+		return false;
 
 	float delayS = (float)delayI / (float)CH_CFG_ST_FREQUENCY;
 
@@ -1608,35 +1575,14 @@ static inline int measurement_tick(void)
 	measurement.speed_tac_ms = cur_speed_tac_ms;
 	measurement.acceleration_tac_mss = cur_acceleration_tac_mss;
 
-	return cur_tac;
+	return true;
 }
 
 
 static void antisex_init(void)
 {
-	antisex_erpm_filtered = mc_interface_get_rpm();
-	antisex_erpm_prev_filtered = antisex_erpm_filtered;
-	antisex_erpm_filtering_step = 0;
-	antisex_acceleration_integral = 0;
-	antisex_acceleration_prev = 0;
 	antisex_amps = 0;
 	antisex_amps_gain = 1;
-	antisex_deceleration_sign = 0;
-	antisex_reduce_step = 0;
-	antisex_measure_step = 0;
-
-#ifdef DEBUG_ANTISEX
-	antisex_sent_zeroes = 0;
-
-	commands_init_plot("Milliseconds", "Speed");
-	commands_plot_add_graph("Speed filtered");
-	commands_plot_add_graph("Acceleration");
-#ifdef DEBUG_ANTISEX_INTEGRAL
-	commands_plot_add_graph("Acceleration integral");
-#endif
-	commands_plot_add_graph("Position");
-	commands_plot_add_graph("Antisex Amps");
-#endif
 }
 
 // Called when the custom application is started. Start our
@@ -1729,7 +1675,7 @@ void app_custom_start(void)
 	terminal_register_command_callback(
 		"measure_spool",
 		"Measure spool virtual mass spinning motor backward and forward with specified force during specified time and measurments with specified interval",
-		"[force (kg)] [apply time (seconds)] [measurment interval (milliseconds)]", terminal_measure_spool);
+		"<force (kg)> <apply time (seconds)> [0 / 1 - use smooth motor and antisex?]", terminal_measure_spool);
 
 #ifdef DEBUG_SMOOTH_MOTOR
 	terminal_register_command_callback(
@@ -2346,8 +2292,6 @@ inline static void process_states(const int cur_tac, const int abs_tac)
 	}
 }
 
-static void antisex_send_border(const bool is_braking, const float speed);
-
 inline static void print_conf(const int cur_tac)
 {
 	float erpm;
@@ -2364,6 +2308,7 @@ inline static void print_conf(const int cur_tac)
 
 	commands_printf("SkyPUFF configuration version %s:", sk_command_str(SK_COMM_SETTINGS_V1));
 	commands_printf("  amperes per 1kg force: %.1fAKg", (double)config.amps_per_kg);
+	commands_printf("  rope gauge max value: %.1fms", (double)config.max_speed_ms);
 	commands_printf("  pull applying period: %.1fs (%d loops)", (double)config.pull_applying_period / (double)1000.0, config.pull_applying_period);
 	commands_printf("  rope length: %.2fm (%d steps)", (double)tac_steps_to_meters(config.rope_length), config.rope_length);
 	commands_printf("  braking range: %.2fm (%d steps)", (double)tac_steps_to_meters(config.braking_length), config.braking_length);
@@ -2392,11 +2337,11 @@ inline static void print_conf(const int cur_tac)
 	commands_printf("  takeoff pull coefficient: %.0f%% (%.2fkg, %.5f)", (double)config.takeoff_pull_k * (double)100.0, (double)(config.pull_current / config.amps_per_kg * config.takeoff_pull_k), (double)config.takeoff_pull_k);
 	commands_printf("  fast pull coefficient: %.0f%% (%.2fkg, %.5f)", (double)config.fast_pull_k * (double)100.0, (double)(config.pull_current / config.amps_per_kg * config.fast_pull_k), (double)config.fast_pull_k);
 
-	commands_printf("  antisex starting integral: %.1fms (%.0f ERPM)", (double)erpm_to_ms(config.antisex_starting_integral), (double)config.antisex_starting_integral);
+	commands_printf("  antisex activation min pull: %.2fkg (%.1fA)", (double)(config.antisex_min_pull_amps / config.amps_per_kg), (double)config.antisex_min_pull_amps);
 	commands_printf("  antisex reducing force: %.2fkg (%.1fA)", (double)(config.antisex_reduce_amps / config.amps_per_kg), (double)config.antisex_reduce_amps);
-	commands_printf("  antisex reduce steps: %d", config.antisex_reduce_steps);
-	commands_printf("  antisex reducing step increase: %.2fkg (%.1fA)", (double)(config.antisex_reduce_amps_per_step / config.amps_per_kg), (double)config.antisex_reduce_amps_per_step);
-	commands_printf("  antisex unwinding gain: %.2f", (double)config.antisex_unwinding_gain);
+	commands_printf("  antisex acceleration on: %.2fms/s^2", (double)config.antisex_acceleration_on_mss);
+	commands_printf("  antisex acceleration off: %.2fms/s^2", (double)config.antisex_acceleration_off_mss);
+	commands_printf("  antisex max applying period: %.1fs", (double)config.antisex_max_period_ms / (double)1000.0);
 
 	commands_printf("SkyPUFF state:");
 	commands_printf("  %s: pos %.2fm (%d steps), speed %.1fm/s (%.1f ERPM)", state_str(state), (double)tac_steps_to_meters(cur_tac), cur_tac, (double)erpm_to_ms(erpm), (double)erpm);
@@ -2761,39 +2706,6 @@ inline static void process_terminal_commands(int *cur_tac, int *abs_tac)
 		terminal_command = DO_NOTHING;
 }
 
-// This have to be refactored to use with Skypuff all
-// For now I use it for debugging from Vesc Tool only
-#ifdef DEBUG_ANTISEX
-static inline void antisex_send_graph(const int cur_tac, const float acceleration)
-{
-	int n = 0;
-	commands_plot_set_graph(n++);
-	commands_send_plot_points(loop_step, antisex_erpm_filtered);
-
-	commands_plot_set_graph(n++);
-	commands_send_plot_points(loop_step, acceleration);
-
-#ifdef DEBUG_ANTISEX_INTEGRAL
-	commands_plot_set_graph(n++);
-	commands_send_plot_points(loop_step, antisex_acceleration_integral);
-#endif
-
-	commands_plot_set_graph(n++);
-
-	// Adapt cur_tac to graph
-	int graph_pos = cur_tac * 30;
-	if (graph_pos < -20000)
-		graph_pos += 60000;
-	else if (graph_pos > 20000)
-		graph_pos -= 60000;
-
-	commands_send_plot_points(loop_step, graph_pos);
-
-	commands_plot_set_graph(n++);
-	commands_send_plot_points(loop_step, current_motor_state.mode == MOTOR_CURRENT ? (current_motor_state.param.current * antisex_amps_gain + antisex_amps) * 200 : 0);
-}
-#endif
-
 static inline void antisex_adjustment(void)
 {
 	// Change motor current only if we are in pull states
@@ -2801,31 +2713,41 @@ static inline void antisex_adjustment(void)
 		mc_interface_set_current(current_motor_state.param.current * antisex_amps_gain + antisex_amps);
 }
 
-static inline bool antisex_is_unwinding_within_hall_speed(const int cur_tac)
+static inline void antisex_tick(void)
 {
-	// Check direction is unwinding and speed is less then sensorless
-	if (cur_tac <= 0)
-	{
-		// This if should inner not to compare cur_tac twice
-		if (antisex_erpm_filtered < 0 && antisex_erpm_filtered >= -mc_conf->foc_sl_erpm)
-			return true;
+	// Nominal pull is not enough for antisex?
+	if(target_motor_state.mode != MOTOR_CURRENT ||
+	   fabs(target_motor_state.param.current) < (double)(config.antisex_min_pull_amps)) {
+		   if(antisex_amps > 0) {
+			   antisex_amps = 0;
+			   antisex_adjustment();
+		   }
+
+		   return;
+	   }
+
+	// Current acceleration is big enough to enable antisex?
+	if(measurement.filtered_acceleration_tac_mss >= config.antisex_acceleration_on_mss &&
+	   antisex_amps != -config.antisex_reduce_amps) {
+		   antisex_amps = -config.antisex_reduce_amps;
+		   antisex_start_time = measurement.time;
+		   antisex_adjustment();
+		   return;
+	   }
+
+	// Do not check end_time or acceleration if already disabled
+	if(antisex_amps == 0)
+		return;
+
+	sysinterval_t activated_interval = chTimeDiffX(antisex_start_time, measurement.time);
+
+	if(measurement.filtered_acceleration_tac_mss <= config.antisex_acceleration_off_mss ||
+	   activated_interval >= MS2ST(config.antisex_max_period_ms)) {
+		antisex_amps = 0;
+		antisex_adjustment();
+		return;
 	}
-	else if (antisex_erpm_filtered > 0 && antisex_erpm_filtered <= mc_conf->foc_sl_erpm)
-		return true;
-
-	return false;
-}
-
-static inline void antisex_send_border(const bool is_braking, const float speed)
-{
-	static char msg_buf[256];
-
-	snprintf(msg_buf, 256, "%s %.1fms", is_braking ? "Braking" : "Accel", (double)erpm_to_ms(speed));
-	send_custom_msg(msg_buf);
-}
-
-static inline void antisex_step(const int cur_tac)
-{
+/*
 	UTILS_LP_FAST(antisex_erpm_filtered, mc_interface_get_rpm(), antisex_erpm_filtering_k);
 
 	// Recalculate antisex_amps_gain
@@ -2963,19 +2885,7 @@ static inline void antisex_step(const int cur_tac)
 			antisex_adjustment();
 		}
 	}
-
-#ifdef DEBUG_ANTISEX
-	if (acceleration > 0.1 || acceleration < -0.1)
-	{
-		antisex_send_graph(cur_tac, acceleration);
-		antisex_sent_zeroes = 0;
-	}
-	else if (antisex_sent_zeroes < 30)
-	{
-		antisex_send_graph(cur_tac, acceleration);
-		antisex_sent_zeroes++;
-	}
-#endif
+*/
 }
 
 static THD_FUNCTION(my_thread, arg)
@@ -2996,7 +2906,11 @@ static THD_FUNCTION(my_thread, arg)
 			return;
 		}
 
-		int cur_tac = measurement_tick(); // Measure speed and acceleration based on tachometer values also
+		int cur_tac = mc_interface_get_tachometer_value(false);
+		
+		if(measurement_tick(cur_tac))  // Are speed and acceleration updated?
+			antisex_tick();
+	
 		int abs_tac = abs(cur_tac);
 
 		// terminal command 'alive'?
@@ -3018,10 +2932,6 @@ static THD_FUNCTION(my_thread, arg)
 		// Time to adjust motor?
 		if (loop_step >= next_smooth_motor_adjustment)
 			smooth_motor_adjustment(cur_tac, abs_tac);
-
-		// Calculate anti oscilations adjustments
-		if (!(loop_step % antisex_measure_delay))
-			antisex_step(cur_tac);
 
 		// Check motor temperature and start/stop fan (AUX_ON / AUX_OFF)
 		if (!(loop_step % fan_check_delay))
@@ -3376,10 +3286,11 @@ void draw_spool_mass_graph(systime_t started, int drawing_ms, float kg)
 void terminal_measure_spool(int argc, const char **argv)
 {
 	float kg = 1, secs = 2;
+	int use_smooth = 0;
 
-	if (argc < 4)
+	if (argc < 3)
 	{
-		commands_printf("%s: -- Command requires at least two arguments (kg, seconds) -- For example: 'measure_spool 5 3'",
+		commands_printf("%s: -- 'measure_spool' requires at least two arguments: <kg> <seconds> [0/1 smooth motor] -- For example: 'measure_spool 5 3 1'",
 						state_str(state));
 		return;
 	}
@@ -3395,6 +3306,13 @@ void terminal_measure_spool(int argc, const char **argv)
 	{
 		commands_printf("%s: -- Can't parse '%s' as seconds value.",
 						state_str(state), argv[2]);
+		return;
+	};
+
+	if(argc == 4 && sscanf(argv[3], "%d", &use_smooth) == EOF)
+	{
+		commands_printf("%s: -- Can't parse '%s' as use_smooth value.",
+						state_str(state), argv[3]);
 		return;
 	};
 
@@ -3425,20 +3343,36 @@ void terminal_measure_spool(int argc, const char **argv)
 	commands_plot_add_graph("Speed unfiltered (m/s)");
 	commands_plot_add_graph("Speed tachometer (m/s)");
 	commands_plot_add_graph("Acceleration tachometer filtered (m/s^2)");
-	commands_plot_add_graph("Virtual spool mass (kg)");
+	commands_plot_add_graph("Spool 'virtual mass' (kg)");
 
-	commands_printf("%s: -- Running backward and forward with %.2fkg (%.1fA) force during %.2fsecs...", 
-					state_str(state), 
+	commands_printf("%s: -- Running forward and backward using %s with %.2fkg (%.1fA) force during %.2fsecs...", 
+					state_str(state), use_smooth ? "'smooth motor'" : "'current control'",
 					(double)kg, (double)(-amps), (double)secs);
 
 	timeout_reset();
 
 	systime_t started = chVTGetSystemTime();
 
-	mc_interface_set_current(-amps);
+	if(use_smooth) {
+		terminal_command = SET_SMOOTH;
+		terminal_motor_state.mode = MOTOR_CURRENT;
+		terminal_motor_state.param.current = amps;
+
+	}
+	else
+		mc_interface_set_current(amps);
+
 	draw_spool_mass_graph(started, secs * 1000, kg);
 
-	mc_interface_set_current(amps);
+	if(use_smooth) {
+		terminal_command = SET_SMOOTH;
+		terminal_motor_state.mode = MOTOR_CURRENT;
+		terminal_motor_state.param.current = -amps;
+
+	}
+	else
+		mc_interface_set_current(-amps);
+
 	draw_spool_mass_graph(started, secs * 1500, kg);
 
 	mc_interface_release_motor();

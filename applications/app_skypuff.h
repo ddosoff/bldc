@@ -103,12 +103,11 @@ typedef struct
 	float max_speed_ms;					// Speed scale limit (only affects the interface)
 
 	// Antisex dampering
-	float antisex_starting_integral;	// Start antisex algorihtm if acceleration integral is higher then this
-	float antisex_reduce_amps;			// Reduce motor amps to this value on deceleration
-	int antisex_reduce_steps;			// Maximum number of steps to increase deceleration
-	float antisex_reduce_amps_per_step; // Deceleration increase amps per step
-	float antisex_unwinding_gain;		// Coefficient to multiply current when unwinding
-	float antisex_gain_speed;			// Unwinding speed when antisex_unwinding_gain applied
+	float antisex_min_pull_amps;		// Activate antisex pull currection if pulling above this only
+	float antisex_reduce_amps;			// Reduce motor amps to this value when antisex is activated
+	float antisex_acceleration_on_mss;  // Activate antisex pull reduce if winding acceleration above this
+	float antisex_acceleration_off_mss; // Deactivate antisex if current acceleration below this
+	int antisex_max_period_ms;          // Do not reduce nominal pull more then this milliseconds
 } skypuff_config;
 
 // Drive settings part of mc_configuration
