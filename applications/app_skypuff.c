@@ -1236,35 +1236,35 @@ inline static bool deserialize_drive(unsigned char *data, unsigned int len, skyp
 
 inline static void serialize_config(uint8_t *buffer, int32_t *ind)
 {
-	buffer_append_float32_auto(buffer, config.amps_per_kg, ind);
-	buffer_append_int16(buffer, config.pull_applying_period, ind);
+	buffer_append_float16(buffer, config.amps_per_kg, 1e2, ind);
+	buffer_append_uint16(buffer, config.pull_applying_period, ind);
 	buffer_append_int32(buffer, config.rope_length, ind);
 	buffer_append_int32(buffer, config.braking_length, ind);
 	buffer_append_int32(buffer, config.braking_extension_length, ind);
 
 	buffer_append_int32(buffer, config.slowing_length, ind);
-	buffer_append_float32_auto(buffer, config.slow_erpm, ind);
+	buffer_append_uint16(buffer, config.slow_erpm, ind);
 	buffer_append_int32(buffer, config.rewinding_trigger_length, ind);
 	buffer_append_int32(buffer, config.unwinding_trigger_length, ind);
-	buffer_append_float32_auto(buffer, config.pull_current, ind);
+	buffer_append_float16(buffer, config.pull_current, 10, ind);
 
-	buffer_append_float32_auto(buffer, config.pre_pull_k, ind);
-	buffer_append_float32_auto(buffer, config.takeoff_pull_k, ind);
-	buffer_append_float32_auto(buffer, config.fast_pull_k, ind);
-	buffer_append_int32(buffer, config.takeoff_trigger_length, ind);
-	buffer_append_int32(buffer, config.pre_pull_timeout, ind);
+	buffer_append_float16(buffer, config.pre_pull_k, 1e4, ind);
+	buffer_append_float16(buffer, config.takeoff_pull_k, 1e4, ind);
+	buffer_append_float16(buffer, config.fast_pull_k, 1e4, ind);
+	buffer_append_uint16(buffer, config.takeoff_trigger_length, ind);
+	buffer_append_uint16(buffer, config.pre_pull_timeout, ind);
 
-	buffer_append_int32(buffer, config.takeoff_period, ind);
-	buffer_append_float32_auto(buffer, config.brake_current, ind);
-	buffer_append_float32_auto(buffer, config.slowing_current, ind);
-	buffer_append_float32_auto(buffer, config.manual_brake_current, ind);
-	buffer_append_float32_auto(buffer, config.unwinding_current, ind);
+	buffer_append_uint16(buffer, config.takeoff_period, ind);
+	buffer_append_float16(buffer, config.brake_current, 10, ind);
+	buffer_append_float16(buffer, config.slowing_current, 10, ind);
+	buffer_append_float16(buffer, config.manual_brake_current, 10, ind);
+	buffer_append_float16(buffer, config.unwinding_current, 10, ind);
 
-	buffer_append_float32_auto(buffer, config.rewinding_current, ind);
-	buffer_append_float32_auto(buffer, config.slow_max_current, ind);
-	buffer_append_float32_auto(buffer, config.manual_slow_max_current, ind);
-	buffer_append_float32_auto(buffer, config.manual_slow_speed_up_current, ind);
-	buffer_append_float32_auto(buffer, config.manual_slow_erpm, ind);
+	buffer_append_float16(buffer, config.rewinding_current, 10, ind);
+	buffer_append_float16(buffer, config.slow_max_current, 10, ind);
+	buffer_append_float16(buffer, config.manual_slow_max_current, 10, ind);
+	buffer_append_float16(buffer, config.manual_slow_speed_up_current, 10, ind);
+	buffer_append_uint16(buffer, config.manual_slow_erpm, ind);
 
 	buffer_append_float16(buffer, config.antisex_min_pull_amps, 10, ind);
 	buffer_append_float16(buffer, config.antisex_reduce_amps, 10, ind);
@@ -1277,7 +1277,7 @@ inline static void serialize_config(uint8_t *buffer, int32_t *ind)
 
 inline static bool deserialize_config(unsigned char *data, unsigned int len, skypuff_config *to, int32_t *ind)
 {
-	const int32_t serialized_settings_v1_length = 110;
+	const int32_t serialized_settings_v1_length = 16 + 16 + 10 + 10 + 10 + 10 + 2;
 
 	int available_bytes = len - *ind;
 	if (available_bytes < serialized_settings_v1_length)
@@ -1287,42 +1287,49 @@ inline static bool deserialize_config(unsigned char *data, unsigned int len, sky
 		return false;
 	}
 
-	to->amps_per_kg = buffer_get_float32_auto(data, ind);
-	to->pull_applying_period = buffer_get_int16(data, ind);
+	// 2 * 2 + 4 * 3 = 16 bytes
+	to->amps_per_kg = buffer_get_float16(data, 1e2, ind);
+	to->pull_applying_period = buffer_get_uint16(data, ind);
 	to->rope_length = buffer_get_int32(data, ind);
 	to->braking_length = buffer_get_int32(data, ind);
 	to->braking_extension_length = buffer_get_int32(data, ind);
 
+	// 4 * 3 + 2 * 2 = 16 bytes
 	to->slowing_length = buffer_get_int32(data, ind);
-	to->slow_erpm = buffer_get_float32_auto(data, ind);
+	to->slow_erpm = buffer_get_uint16(data, ind);
 	to->rewinding_trigger_length = buffer_get_int32(data, ind);
 	to->unwinding_trigger_length = buffer_get_int32(data, ind);
-	to->pull_current = buffer_get_float32_auto(data, ind);
+	to->pull_current = buffer_get_float16(data, 10, ind);
 
-	to->pre_pull_k = buffer_get_float32_auto(data, ind);
-	to->takeoff_pull_k = buffer_get_float32_auto(data, ind);
-	to->fast_pull_k = buffer_get_float32_auto(data, ind);
-	to->takeoff_trigger_length = buffer_get_int32(data, ind);
-	to->pre_pull_timeout = buffer_get_int32(data, ind);
+	// 2 * 5 = 10 bytes
+	to->pre_pull_k = buffer_get_float16(data, 1e4, ind);
+	to->takeoff_pull_k = buffer_get_float16(data, 1e4, ind);
+	to->fast_pull_k = buffer_get_float16(data, 1e4, ind);
+	to->takeoff_trigger_length = buffer_get_uint16(data, ind); // short distance
+	to->pre_pull_timeout = buffer_get_uint16(data, ind);
 
-	to->takeoff_period = buffer_get_int32(data, ind);
-	to->brake_current = buffer_get_float32_auto(data, ind);
-	to->slowing_current = buffer_get_float32_auto(data, ind);
-	to->manual_brake_current = buffer_get_float32_auto(data, ind);
-	to->unwinding_current = buffer_get_float32_auto(data, ind);
+	// 2 * 5 = 10 bytes
+	to->takeoff_period = buffer_get_uint16(data, ind);
+	to->brake_current = buffer_get_float16(data, 10, ind);
+	to->slowing_current = buffer_get_float16(data, 10, ind);
+	to->manual_brake_current = buffer_get_float16(data, 10, ind);
+	to->unwinding_current = buffer_get_float16(data, 10, ind);
 
-	to->rewinding_current = buffer_get_float32_auto(data, ind);
-	to->slow_max_current = buffer_get_float32_auto(data, ind);
-	to->manual_slow_max_current = buffer_get_float32_auto(data, ind);
-	to->manual_slow_speed_up_current = buffer_get_float32_auto(data, ind);
-	to->manual_slow_erpm = buffer_get_float32_auto(data, ind);
+	// 2 * 5 = 10 bytes
+	to->rewinding_current = buffer_get_float16(data, 10, ind);
+	to->slow_max_current = buffer_get_float16(data, 10, ind);
+	to->manual_slow_max_current = buffer_get_float16(data, 10, ind);
+	to->manual_slow_speed_up_current = buffer_get_float16(data, 10, ind);
+	to->manual_slow_erpm = buffer_get_uint16(data, ind);
 
+	// 2 * 5 = 10 bytes
 	to->antisex_min_pull_amps = buffer_get_float16(data, 10, ind);
 	to->antisex_reduce_amps = buffer_get_float16(data, 10, ind);
 	to->antisex_acceleration_on_mss = buffer_get_float16(data, 1e2, ind);
 	to->antisex_acceleration_off_mss = buffer_get_float16(data, 1e2, ind);
 	to->antisex_max_period_ms = buffer_get_uint16(data, ind);
 
+	// 2 bytes
 	to->max_speed_ms = buffer_get_float16(data, 1e2, ind);
 
 	return true;
@@ -3271,6 +3278,10 @@ void draw_spool_mass_graph(systime_t started, int drawing_ms, float kg)
 			commands_plot_set_graph(n++);
 			commands_send_plot_points(from_startedS, measurement.filtered_acceleration_tac_mss);
 
+			// Instant pull (kg)
+			commands_plot_set_graph(n++);
+			commands_send_plot_points(from_startedS, mc_interface_get_tot_current_directional_filtered() / config.amps_per_kg);
+
 			// Mass (kg) 
 			// F = ma, m = F / a
 			if(fabs(measurement.filtered_acceleration_tac_mss) > 1) {
@@ -3343,6 +3354,7 @@ void terminal_measure_spool(int argc, const char **argv)
 	commands_plot_add_graph("Speed unfiltered (m/s)");
 	commands_plot_add_graph("Speed tachometer (m/s)");
 	commands_plot_add_graph("Acceleration tachometer filtered (m/s^2)");
+	commands_plot_add_graph("Pull (kg)");
 	commands_plot_add_graph("Spool 'virtual mass' (kg)");
 
 	commands_printf("%s: -- Running forward and backward using %s with %.2fkg (%.1fA) force during %.2fsecs...", 

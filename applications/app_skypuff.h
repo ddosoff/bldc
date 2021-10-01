@@ -87,7 +87,7 @@ typedef struct
 	float takeoff_pull_k;				// takeoff_pull_k * pull_current = pull current during takeoff
 	float fast_pull_k;					// fast_pull_k * pull_current = pull current to get altitude fast
 	int takeoff_trigger_length;			// Minimal PRE_PULL movement for transition to TAKEOFF_PULL
-	int pre_pull_timeout;				// Timeout before saving position after PRE_PULL
+	int pre_pull_timeout;				// Milliseconds timeout to save position after PRE_PULL
 	int takeoff_period;					// Time of TAKEOFF_PULL and then switch to normal PULL
 	float brake_current;				// Braking zone force, could be set high to charge battery driving away
 	float slowing_current;				// Set zero to release motor when slowing or positive value to brake
