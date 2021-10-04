@@ -227,6 +227,7 @@ static const skypuff_drive max_drive_limits = {
 static const skypuff_config min_config = {
 	.amps_per_kg = 0.5,
 	.pull_applying_period = 1, // 0.001 secs
+	.braking_applying_period = 1, // 0.001 secs
 	.rope_length = 5,
 	.braking_length = 5,
 	.braking_extension_length = 3, // To create trigger length after unwinding
@@ -262,8 +263,9 @@ static const skypuff_config min_config = {
 
 static const skypuff_config max_config = {
 	.amps_per_kg = 30,
-	.pull_applying_period = 10000, // 10 secs
-	.rope_length = 5000 * 120,	   // 120 - maximum motor poles * 3
+	.pull_applying_period = 10000,   // 10 secs
+	.braking_applying_period = 2000, // 2 secs
+	.rope_length = 5000 * 120,	     // 120 - maximum motor poles * 3
 	.braking_length = 100 * 120,
 	.braking_extension_length = 5000 * 120,
 	.slowing_length = 100 * 120,
@@ -779,6 +781,8 @@ static bool is_config_out_of_limits(const skypuff_config *conf)
 								  min_config.amps_per_kg, max_config.amps_per_kg) ||
 		   is_int_out_of_limits("pull_applying_period", "milliseconds", conf->pull_applying_period,
 								min_config.pull_applying_period, max_config.pull_applying_period) ||
+		   is_int_out_of_limits("braking_applying_period", "milliseconds", conf->braking_applying_period,
+								min_config.braking_applying_period, max_config.braking_applying_period) ||
 		   is_distance_out_of_limits("rope_length", conf->rope_length,
 									 min_config.rope_length, max_config.rope_length) ||
 		   is_distance_out_of_limits("braking_length", conf->braking_length,
@@ -797,8 +801,8 @@ static bool is_config_out_of_limits(const skypuff_config *conf)
 								  min_config.slow_erpm, max_config.slow_erpm) ||
 		   is_speed_out_of_limits("manual_slow_erpm", conf->manual_slow_erpm,
 								  min_config.manual_slow_erpm, max_config.manual_slow_erpm) ||
-		  // is_speed_out_of_limits("unwinding_strong_erpm", conf->unwinding_strong_erpm,
-		//						  min_config.unwinding_strong_erpm, max_config.unwinding_strong_erpm) ||
+		   is_speed_out_of_limits("unwinding_strong_erpm", conf->unwinding_strong_erpm,
+								  min_config.unwinding_strong_erpm, max_config.unwinding_strong_erpm) ||
 		   is_pull_out_of_limits("pull_current", conf->pull_current,
 								 min_config.pull_current, max_config.pull_current) ||
 		   is_pull_out_of_limits("brake_current", conf->brake_current,
@@ -809,8 +813,8 @@ static bool is_config_out_of_limits(const skypuff_config *conf)
 								 min_config.manual_brake_current, max_config.manual_brake_current) ||
 		   is_pull_out_of_limits("unwinding_current", conf->unwinding_current,
 								 min_config.unwinding_current, max_config.unwinding_current) ||
-		   //is_pull_out_of_limits("unwinding_strong_current", conf->unwinding_strong_current,
-		//						 min_config.unwinding_strong_current, max_config.unwinding_strong_current) ||
+		   is_pull_out_of_limits("unwinding_strong_current", conf->unwinding_strong_current,
+								 min_config.unwinding_strong_current, max_config.unwinding_strong_current) ||
 		   is_pull_out_of_limits("rewinding_current", conf->rewinding_current,
 								 conf->unwinding_current, max_config.rewinding_current) ||
 		   is_pull_out_of_limits("slow_max_current", conf->slow_max_current,
@@ -1164,6 +1168,7 @@ static void set_example_conf(skypuff_config *cfg)
 	// Forces
 	cfg->amps_per_kg = 3;			  // 7 Amps for 1Kg force
 	cfg->pull_applying_period = 1500; // 1.5 secs
+	cfg->braking_applying_period = 500; // 0.5 secs
 	cfg->brake_current = 0.3 * cfg->amps_per_kg;
 	cfg->slowing_current = 0.5 * cfg->amps_per_kg;
 	cfg->manual_brake_current = 1 * cfg->amps_per_kg;
@@ -1273,11 +1278,15 @@ inline static void serialize_config(uint8_t *buffer, int32_t *ind)
 	buffer_append_uint16(buffer, config.antisex_max_period_ms, ind);
 
 	buffer_append_float16(buffer, config.max_speed_ms, 1e2, ind);
+	buffer_append_uint16(buffer, config.braking_applying_period, ind);
+	buffer_append_float16(buffer, config.unwinding_strong_current, 10, ind);
+	buffer_append_int16(buffer, config.unwinding_strong_erpm, ind);
+
 }
 
 inline static bool deserialize_config(unsigned char *data, unsigned int len, skypuff_config *to, int32_t *ind)
 {
-	const int32_t serialized_settings_v1_length = 16 + 16 + 10 + 10 + 10 + 10 + 2;
+	const int32_t serialized_settings_v1_length = 16 + 16 + 10 + 10 + 10 + 10 + 8;
 
 	int available_bytes = len - *ind;
 	if (available_bytes < serialized_settings_v1_length)
@@ -1329,8 +1338,11 @@ inline static bool deserialize_config(unsigned char *data, unsigned int len, sky
 	to->antisex_acceleration_off_mss = buffer_get_float16(data, 1e2, ind);
 	to->antisex_max_period_ms = buffer_get_uint16(data, ind);
 
-	// 2 bytes
+	// 2 * 4 = 8 bytes
 	to->max_speed_ms = buffer_get_float16(data, 1e2, ind);
+	to->braking_applying_period = buffer_get_uint16(data, ind);
+	to->unwinding_strong_current = buffer_get_float16(data, 10, ind);
+	to->unwinding_strong_erpm = buffer_get_int16(data, ind);
 
 	return true;
 }
@@ -2317,6 +2329,7 @@ inline static void print_conf(const int cur_tac)
 	commands_printf("  amperes per 1kg force: %.1fAKg", (double)config.amps_per_kg);
 	commands_printf("  rope gauge max value: %.1fms", (double)config.max_speed_ms);
 	commands_printf("  pull applying period: %.1fs (%d loops)", (double)config.pull_applying_period / (double)1000.0, config.pull_applying_period);
+	commands_printf("  braking applying period: %.1fs (%d loops)", (double)config.braking_applying_period / (double)1000.0, config.braking_applying_period);
 	commands_printf("  rope length: %.2fm (%d steps)", (double)tac_steps_to_meters(config.rope_length), config.rope_length);
 	commands_printf("  braking range: %.2fm (%d steps)", (double)tac_steps_to_meters(config.braking_length), config.braking_length);
 	commands_printf("  braking extension range: %.2fm (%d steps)", (double)tac_steps_to_meters(config.braking_extension_length), config.braking_extension_length);
