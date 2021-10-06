@@ -95,7 +95,7 @@ typedef struct
 	float manual_brake_current;			// Manual braking force
 	float unwinding_current;			// Unwinding force
 	float unwinding_strong_current;		// Due to motor cogging we need more powerfull unwinding near zero speed
-	float unwinding_strong_erpm;		// Enable strong unwinding if unwinding speed is less then this value, set negative to enable on low speed unwinding
+	float unwinding_strong_erpm;			// Enable strong current unwinding if current speed is above
 	float rewinding_current;			// Rewinding force
 	float slow_max_current;				// Max force for constant slow speed
 	float manual_slow_max_current;		// Max force for MANUAL_SLOW and MANUAL_SLOW_BACK

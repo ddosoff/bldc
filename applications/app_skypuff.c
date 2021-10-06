@@ -89,6 +89,7 @@ const int smooth_max_step_delay = 100;
 const float fan_on_temp = 50;    // Motor fan and VESC fan are parallel connected
 const float fan_off_temp = 48;
 const int fan_check_delay = 200; // 200ms delay before checks
+const int strong_unwinding_period = 2000; // 2 secs of strong unwinding current after entering unwinding
 
 const char *limits_wrn = "-- CONFIGURATION IS OUT OF LIMITS --";
 
@@ -128,7 +129,8 @@ static int alive_until;					 // In good communication we trust until (i < alive_
 static int state_start_time;			 // Count the duration of state
 static float terminal_pull_kg;			 // Pulling force to set
 static volatile int alive_inc;			 // Communication timeout increment from terminal thread
-static bool is_fan_active;		 // AUX_ON?
+static bool is_fan_active;				 // AUX_ON?
+static int unwinding_start_step;         // loop_step when entering UNWINDING
 
 // Prevent long time oscilations
 // Long rope in the air works like a big spring
@@ -150,7 +152,9 @@ struct {
 	float acceleration_tac_mss;
 
 	float filtered_speed_tac_ms;
-	float filtered_acceleration_tac_mss;	
+	float filtered_acceleration_tac_mss;
+
+	bool updated;
 } measurement;
 
 // Missing ChibiOS time types
@@ -403,9 +407,9 @@ inline static int smooth_motor_prev_adjustment_delay(void)
 	return prev_adjustment_delay;
 }
 
-inline static void smooth_calculate_new_speed(void)
+inline static void smooth_calculate_new_speed(float applying_period)
 {
-	amps_per_sec = config.pull_current / ((float)config.pull_applying_period / (float)1000.0);
+	amps_per_sec = config.pull_current / (applying_period / (float)1000.0);
 }
 
 // Do not complicate this calculation with jumps over unwinding boundaries
@@ -654,6 +658,7 @@ inline static void smooth_motor_brake(const int cur_tac, const int abs_tac, cons
 					state_str(state), loop_step, cur_tac, (double)current);
 #endif
 
+	smooth_calculate_new_speed(config.braking_applying_period);
 	target_motor_state.mode = MOTOR_BRAKING;
 	target_motor_state.param.current = current;
 
@@ -667,6 +672,7 @@ inline static void smooth_motor_current(const int cur_tac, const int abs_tac, co
 					state_str(state), loop_step, (double)current);
 #endif
 
+	smooth_calculate_new_speed(config.pull_applying_period);
 	target_motor_state.mode = MOTOR_CURRENT;
 	target_motor_state.param.current = current;
 
@@ -1026,9 +1032,21 @@ inline static void pull_state(const int cur_tac, const float pull_current, const
 	current_state(cur_tac, current, new_state, additional_msg);
 }
 
+inline static float unwinding_current(void)
+{
+	if(measurement.filtered_speed_tac_ms > erpm_to_ms(config.unwinding_strong_erpm) ||
+	  loop_step - unwinding_start_step < strong_unwinding_period)
+		return config.unwinding_strong_current;
+	else
+		return config.unwinding_current;
+}
+
 inline static void unwinding(const int cur_tac)
 {
-	pull_state(cur_tac, config.unwinding_current, UNWINDING, "");
+	if(state != UNWINDING)
+		unwinding_start_step = loop_step;
+
+	pull_state(cur_tac, unwinding_current(), UNWINDING, "");
 }
 
 inline static void rewinding(const int cur_tac)
@@ -1563,6 +1581,7 @@ static void measurement_init(void)
 	measurement.filtered_speed_tac_ms = 0;
 	measurement.filtered_acceleration_tac_mss = 0;
 
+	measurement.updated = false;
 }
 
 // Returns current tachometer value each time
@@ -1572,8 +1591,12 @@ static inline bool measurement_tick(int cur_tac)
 	systime_t cur_time = chVTGetSystemTime();
 	sysinterval_t delayI = chTimeDiffX(measurement.time, cur_time);
 
-	if(delayI < measurement_delay)
+	if(delayI < measurement_delay) {
+		measurement.updated = false;
 		return false;
+	}
+
+	measurement.updated = true;
 
 	float delayS = (float)delayI / (float)CH_CFG_ST_FREQUENCY;
 
@@ -1636,9 +1659,6 @@ void app_custom_start(void)
 	smooth_motor_release();
 
 	read_config_from_eeprom(&config);
-
-	// Update smooth speed for current pull
-	smooth_calculate_new_speed();
 
 	measurement_init();
 	antisex_init();
@@ -1974,6 +1994,13 @@ inline static void process_states(const int cur_tac, const int abs_tac)
 		// Go braking or slowing?
 		if (brake_or_slowing(cur_tac, abs_tac))
 			break;
+
+		// Strong unwinding or normal?
+		if(measurement.updated) {
+			float amps = unwinding_current();
+			if(target_motor_state.param.current != amps)
+				pull_state(cur_tac, amps, UNWINDING, "");
+		}
 
 		// Use prev_abs_tac as max tachometer
 		if (abs_tac > prev_abs_tac)
@@ -2509,9 +2536,6 @@ inline static void process_terminal_commands(int *cur_tac, int *abs_tac)
 
 		config.pull_current = pull_current;
 
-		// Update smooth speed
-		smooth_calculate_new_speed();
-
 		send_force_is_set();
 #ifdef VERBOSE_TERMINAL
 		commands_printf("%s: -- %.2fKg (%.1fA, %.1fA/sec) is set",
@@ -2663,8 +2687,6 @@ inline static void process_terminal_commands(int *cur_tac, int *abs_tac)
 			}
 
 			config = set_config;
-
-			smooth_calculate_new_speed();
 
 			store_config_to_eeprom(&config);
 
