@@ -558,7 +558,7 @@ inline static void smooth_motor_adjustment(const int cur_tac, const int abs_tac)
 				return;
 			}
 
-			mc_interface_set_current(step_current);
+			mc_interface_set_current(step_current * antisex_amps_gain + antisex_amps);
 			current_motor_state.param.current = step_current;
 
 			prev_smooth_motor_adjustment = loop_step;
@@ -2757,177 +2757,28 @@ static inline void antisex_adjustment(void)
 
 static inline void antisex_tick(void)
 {
-	// Nominal pull is not enough for antisex?
-	if(target_motor_state.mode != MOTOR_CURRENT ||
-	   fabs(target_motor_state.param.current) < (double)(config.antisex_min_pull_amps)) {
-		   if(antisex_amps > 0) {
-			   antisex_amps = 0;
-			   antisex_adjustment();
-		   }
-
-		   return;
-	   }
-
-	// Current acceleration is big enough to enable antisex?
-	if(measurement.filtered_acceleration_tac_mss >= config.antisex_acceleration_on_mss &&
-	   antisex_amps != -config.antisex_reduce_amps) {
-		   antisex_amps = -config.antisex_reduce_amps;
-		   antisex_start_time = measurement.time;
-		   antisex_adjustment();
-		   return;
-	   }
-
-	// Do not check end_time or acceleration if already disabled
-	if(antisex_amps == 0)
-		return;
-
-	sysinterval_t activated_interval = chTimeDiffX(antisex_start_time, measurement.time);
-
-	if(measurement.filtered_acceleration_tac_mss <= config.antisex_acceleration_off_mss ||
-	   activated_interval >= MS2ST(config.antisex_max_period_ms)) {
-		antisex_amps = 0;
-		antisex_adjustment();
-		return;
-	}
-/*
-	UTILS_LP_FAST(antisex_erpm_filtered, mc_interface_get_rpm(), antisex_erpm_filtering_k);
-
-	// Recalculate antisex_amps_gain
-	float antisex_amps_gain_current;
-	if (cur_tac <= 0)
-		if (antisex_erpm_filtered < -config.antisex_gain_speed)
-			antisex_amps_gain_current = config.antisex_unwinding_gain;
-		else
-			antisex_amps_gain_current = 1;
-	else if (antisex_erpm_filtered > config.antisex_gain_speed)
-		antisex_amps_gain_current = config.antisex_unwinding_gain;
-	else
-		antisex_amps_gain_current = 1;
-
-	// Update motor amps, if gain changed
-	if (antisex_amps_gain != antisex_amps_gain_current)
-	{
-		antisex_amps_gain = antisex_amps_gain_current;
-		antisex_adjustment();
-	}
-
-	antisex_erpm_filtering_step++;
-
-	if (antisex_erpm_filtering_step < antisex_erpm_filtering_steps)
-		return;
-
-	antisex_erpm_filtering_step = 0;
-
-	float acceleration = (antisex_erpm_filtered - antisex_erpm_prev_filtered) * antisex_acceleration_time_k;
-
-	antisex_erpm_prev_filtered = antisex_erpm_filtered;
-
-	static bool use_final_step;
-	// Acceleration crossed zero?
-	if ((acceleration > -0.1 && antisex_acceleration_prev < 0) || (acceleration < 0.1 && antisex_acceleration_prev > 0))
-	{
-		// Calculate if it's time to start decceleration sequence?
-		if (cur_tac <= 0)
-		{
-			if (antisex_acceleration_integral > config.antisex_starting_integral)
-			{
-				antisex_deceleration_sign = -1;
-				antisex_acceleration_before_reduce = acceleration;
-				antisex_reduce_step = 0;
-				antisex_measure_step = antisex_measure_steps; // Apply on first step
-				use_final_step = true;
-#ifdef DEBUG_ANTISEX_BORDERS
-				antisex_send_border(true, antisex_erpm_filtered);
-#endif
-			}
-			else if (antisex_acceleration_integral < -config.antisex_starting_integral)
-			{
-				antisex_deceleration_sign = 1;
-				antisex_acceleration_before_reduce = acceleration;
-				antisex_reduce_step = 0;
-				antisex_measure_step = antisex_measure_steps; // Apply on first step
-				use_final_step = false;
-#ifdef DEBUG_ANTISEX_BORDERS
-				antisex_send_border(false, antisex_erpm_filtered);
-#endif
-			}
-		}
-		else // cur_tac is above zero
-		{
-			if (antisex_acceleration_integral < -config.antisex_starting_integral)
-			{
-				antisex_deceleration_sign = 1;
-				antisex_acceleration_before_reduce = acceleration;
-				antisex_reduce_step = 0;
-				antisex_measure_step = antisex_measure_steps; // Apply on first step
-				use_final_step = true;
-#ifdef DEBUG_ANTISEX_BORDERS
-				antisex_send_border(true, antisex_erpm_filtered);
-#endif
-			}
-			else if (antisex_acceleration_integral > config.antisex_starting_integral)
-			{
-				antisex_deceleration_sign = -1;
-				antisex_acceleration_before_reduce = acceleration;
-				antisex_reduce_step = 0;
-				antisex_measure_step = antisex_measure_steps; // Apply on first step
-				use_final_step = false;
-#ifdef DEBUG_ANTISEX_BORDERS
-				antisex_send_border(false, antisex_erpm_filtered);
-#endif
-			}
-		}
-
-		antisex_acceleration_integral = 0;
-	}
-
-	antisex_acceleration_prev = acceleration;
-
-	antisex_acceleration_integral += acceleration * ((float)(antisex_measure_delay * antisex_erpm_filtering_steps) / 1000.0F);
-
-	// Previous loop was deceleartion?
-	if (antisex_amps)
-	{
-		// Just release and wait next loop to measure
-		antisex_amps = 0;
-		antisex_adjustment();
-		antisex_measure_step = 0;
-	}
-	else if (antisex_deceleration_sign)
-	{
-		antisex_measure_step++;
-		if (antisex_measure_step >= antisex_measure_steps)
-		{
-			// Check if time to stop?
-			bool final_step = false;
-			if (antisex_deceleration_sign == -1)
-			{
-				if (acceleration > antisex_acceleration_before_reduce || antisex_is_unwinding_within_hall_speed(cur_tac))
-					final_step = true; //antisex_deceleration_sign = 0;
-			}
-			else if (antisex_deceleration_sign == 1)
-			{
-				if (acceleration < antisex_acceleration_before_reduce || antisex_is_unwinding_within_hall_speed(cur_tac))
-					final_step = true; //antisex_deceleration_sign = 0;
-			}
-			antisex_acceleration_before_reduce = acceleration;
-
-			// Revert sign if final step
-			if (final_step && use_final_step)
-				antisex_deceleration_sign *= -1;
-
-			antisex_amps = antisex_deceleration_sign * (config.antisex_reduce_amps + antisex_reduce_step * config.antisex_reduce_amps_per_step);
-
-			if (final_step)
-				antisex_deceleration_sign = 0;
-
-			if (antisex_reduce_step < config.antisex_reduce_steps)
-				antisex_reduce_step++;
-
+	bool isCurrentStrongEnough = current_motor_state.mode == MOTOR_CURRENT &&
+							     current_motor_state.param.current >= config.antisex_min_pull_amps;
+	
+	// Antisex disabled?
+	if(antisex_amps == 0) {
+		// Pull in with fast acceleration pulling more then min pull
+		if(isCurrentStrongEnough && measurement.filtered_acceleration_tac_mss >= config.antisex_acceleration_on_mss) {
+			// Enable pull reduction
+			antisex_amps = -config.antisex_reduce_amps;
+			antisex_start_time = measurement.time;
 			antisex_adjustment();
 		}
+		return;
 	}
-*/
+
+	// Antisex is enabled, but should we turn it off?
+	if(!isCurrentStrongEnough || 
+	   measurement.filtered_acceleration_tac_mss <= config.antisex_acceleration_off_mss || // Strong pull out acceleration?
+	   chTimeDiffX(antisex_start_time, measurement.time) >= MS2ST(config.antisex_max_period_ms)) {  // Timed out?
+		antisex_amps = 0;
+		antisex_adjustment();
+	}
 }
 
 static THD_FUNCTION(my_thread, arg)
