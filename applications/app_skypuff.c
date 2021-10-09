@@ -64,23 +64,7 @@
 	All terminal output will be moved under VERBOSE_TERMINAL define. 
 	Only critical logic/hardware errors will be printed to terminal imediatelly.
 
-	In the past, terminal output format was unified to simplify UI side parsing.
-
-	Each print consist of current state and comma delimeted messages.
-
-	State: type message, type message, ...
-
-	Types:
-	  'pos': current position
-	  'pull': pulling or braking force
-	  'speed': current speed
-	  '--': warning text until end of line 
-
-	Examples:
-		UNINITIALIZED: -- CONFIGURATION IS OUT OF LIMITS -- Braking current 0.0A is out of limits (0.5, 20.0)
-		BRAKING: pos 0.00m (0 steps), speed: -0.0ms (-0 ERPM), braking 1.0Kg (7.0A)
-
-	On double '--' UI will show message dialog with first payload as title and second as text.
+	From 9 October 2021 'pull in' direction should have positive current, 'pull out' negative.
 */
 
 const int short_print_delay = 500; // 0.5s, measured in control loop counts
