@@ -41,6 +41,7 @@
 #include <ctype.h>
 
 //#define DEBUG_SMOOTH_MOTOR
+//#define DEBUG_ANTISEX
 //#define VERBOSE_TERMINAL
 
 #include "app_skypuff.h"
@@ -1182,7 +1183,7 @@ static void set_example_conf(skypuff_config *cfg)
 	cfg->manual_slow_speed_up_current = 0.4 * cfg->amps_per_kg;
 
 	// Pull settings
-	cfg->pull_current = 0.9 * cfg->amps_per_kg;
+	cfg->pull_current = 3 * cfg->amps_per_kg;
 	cfg->pre_pull_k = 30 / 100.0;
 	cfg->takeoff_pull_k = 60 / 100.0;
 	cfg->fast_pull_k = 120 / 100.0;
@@ -1191,11 +1192,11 @@ static void set_example_conf(skypuff_config *cfg)
 	cfg->takeoff_period = 5 * 1000;
 
 	// Antisex
-	cfg->antisex_min_pull_amps = 1.5;
-	cfg->antisex_reduce_amps = 1;
+	cfg->antisex_min_pull_amps = 0.7 * cfg->amps_per_kg;
+	cfg->antisex_reduce_amps = 0.5 * cfg->amps_per_kg;
 	cfg->antisex_acceleration_on_mss = 7;
-	cfg->antisex_acceleration_off_mss = -0.5;
-	cfg->antisex_max_period_ms = 200;
+	cfg->antisex_acceleration_off_mss = -3;
+	cfg->antisex_max_period_ms = 2000;
 
 	// Speed scale limit
 	cfg->max_speed_ms = 20;
@@ -2752,6 +2753,10 @@ static inline void antisex_tick(void)
 			antisex_amps = -config.antisex_reduce_amps;
 			antisex_start_time = measurement.time;
 			antisex_adjustment();
+#ifdef DEBUG_ANTISEX
+	commands_printf("%s: antisex ON", state_str(state));
+#endif
+
 		}
 		return;
 	}
@@ -2762,7 +2767,10 @@ static inline void antisex_tick(void)
 	   chTimeDiffX(antisex_start_time, measurement.time) >= MS2ST(config.antisex_max_period_ms)) {  // Timed out?
 		antisex_amps = 0;
 		antisex_adjustment();
-	}
+	#ifdef DEBUG_ANTISEX
+	commands_printf("%s: antisex OFF", state_str(state));
+#endif
+}
 }
 
 static THD_FUNCTION(my_thread, arg)
