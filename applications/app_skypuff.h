@@ -51,20 +51,20 @@ typedef enum
 typedef enum
 {
 	UNINITIALIZED,			   // Released motor until some valid configuration set
-	BRAKING,				   // Braking zone near take off
-	BRAKING_EXTENSION,		   // Braking after braking zone. Set long to disable automatic transition to UNWINDING. Manual possible.
-	SLOWING,				   // Next to braking zone to slow down the motor
-	SLOW,					   // Constant speed in direction to zero
-	UNWINDING,				   // Low force rope tension during step up or unwinder mode
-	REWINDING,				   // Fast rope winding to zero for unwinder mode
+	BRAKING,				   // Braking zone near zero. Applies small amount of brake to the motor when external torque applied.
+	BRAKING_EXTENSION,		   // Next to braking zone to prevent automatic transition to UNWINDING. Used for passive winches.
+	SLOWING,				   // Next to braking zone to decrease speed and make transition to SLOW mode.
+	SLOW,					   // Constant slow speed in direction to zero.
+	UNWINDING,				   // Low force rope tension during step away. Also required for transition to PULL states.
+	REWINDING,				   // Fast rope winding to zero with more force then UNWINDING.
 	PRE_PULL,				   // Pull the pilot while stays on the takeoff
 	TAKEOFF_PULL,			   // Takeoff pull
 	PULL,					   // Nominal pull
 	FAST_PULL,				   // Fast pull
-	MANUAL_BRAKING,			   // Any position braking caused by operator or communication timeout
-	MANUAL_SLOW_SPEED_UP,	   // Speed up until manual constant speed with positive current
+	MANUAL_BRAKING,			   // Any position braking mode, caused by operator or communication timeout
+	MANUAL_SLOW_SPEED_UP,	   // Speed up until manual constant speed reached with positive current
 	MANUAL_SLOW,			   // Constant speed mode with positive current
-	MANUAL_SLOW_BACK_SPEED_UP, // Speed up until manual constant speed in negative current
+	MANUAL_SLOW_BACK_SPEED_UP, // Speed up until manual constant speed with negative current
 	MANUAL_SLOW_BACK,		   // Constant speed mode with negative current
 	MANUAL_DEBUG_SMOOTH,       // Debug smooth motor movements with 'smooth' terminal commands
 	DISCONNECTED,              // UI only state
@@ -75,11 +75,11 @@ typedef struct
 {
 	float amps_per_kg;					// Winch drive force coefficient
 	int pull_applying_period;			// Milliseconds to apply pull force, amps_per_sec will be calculated from this delay
-	int braking_applying_period;        // Milliseconds to release pull force when going Manual Braking
+	int braking_applying_period;        // Milliseconds to release pull force when going MANUAL_BRAKING
 	int rope_length;					// Winch rope length in tachometer steps (used by interface only)
-	int braking_length;					// Tachometer range of braking zone
-	int braking_extension_length;		// Increase braking_length for passive winches when car drive 150m from takeoff
-	int slowing_length;					// Range after braking zone to slow down motor when unwinding to zero
+	int braking_length;					// Length of braking zone in tachometer steps
+	int braking_extension_length;		// Increased braking_length for passive winches when car drives 150m from takeoff
+	int slowing_length;					// Range after braking zone to slow down the motor from UNWINDING or PULL states.
 	float slow_erpm;					// Constant erpm in direction to zero
 	int rewinding_trigger_length;		// Switch to fast rewinding state after going back this length
 	int unwinding_trigger_length;		// Back to unwinding from rewinding if this range unwinded again
@@ -95,7 +95,7 @@ typedef struct
 	float manual_brake_current;			// Manual braking force
 	float unwinding_current;			// Unwinding force
 	float unwinding_strong_current;		// Due to motor cogging we need more powerfull unwinding near zero speed
-	float unwinding_strong_erpm;			// Enable strong current unwinding if current speed is above
+	float unwinding_strong_erpm;		// Enable strong current unwinding if current speed is above
 	float rewinding_current;			// Rewinding force
 	float slow_max_current;				// Max force for constant slow speed
 	float manual_slow_max_current;		// Max force for MANUAL_SLOW and MANUAL_SLOW_BACK
@@ -133,17 +133,15 @@ typedef struct
 /*
 	Smooth Motor Control
 
-	Respect pilot and do not pull or release him too sharply.
-	Unwinding current is minimal step of applying pull or brake.
+	This program respects pilot and does not pull or release him too rough.
 
-	Use config.amps_per_sec as force changing speed and
+	Smooth motor code uses config.amps_per_sec as force changing speed and
 	smooth_max_step_delay as maximum step delay.
 
-	In case of different current and target modes, 
-	switch instantly if force is less then unwinding 
-	and smoothly decrease/increase until unwinding if above.
-
 	Always brake instantly if braking zone.
+
+	Functions started with 'smooth_' prefix control the motor via VESC mc_interface
+	API. Skypuff FSM control the motor via 'smooth_' API.
 */
 typedef enum
 {

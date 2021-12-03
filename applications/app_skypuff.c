@@ -2754,9 +2754,8 @@ static inline void antisex_tick(void)
 			antisex_start_time = measurement.time;
 			antisex_adjustment();
 #ifdef DEBUG_ANTISEX
-	commands_printf("%s: antisex ON", state_str(state));
+			commands_printf("%s: antisex ON", state_str(state));
 #endif
-
 		}
 		return;
 	}
@@ -2767,8 +2766,8 @@ static inline void antisex_tick(void)
 	   chTimeDiffX(antisex_start_time, measurement.time) >= MS2ST(config.antisex_max_period_ms)) {  // Timed out?
 		antisex_amps = 0;
 		antisex_adjustment();
-	#ifdef DEBUG_ANTISEX
-	commands_printf("%s: antisex OFF", state_str(state));
+#ifdef DEBUG_ANTISEX
+		commands_printf("%s: antisex OFF", state_str(state));
 #endif
 }
 }
