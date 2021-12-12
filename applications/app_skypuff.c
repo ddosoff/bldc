@@ -1119,18 +1119,9 @@ inline static void speed_state(const int cur_tac, const float cur_erpm,
 	timeout_reset();
 }
 
-inline static void slow_state(const int cur_tac, const float cur_erpm,
-							  const float constant_erpm, const skypuff_state new_state)
-{
-	// Detect zero direction depending on tachometer value
-	float to_zero_constant_erpm = cur_tac < 0 ? constant_erpm : -constant_erpm;
-
-	speed_state(cur_tac, cur_erpm, to_zero_constant_erpm, new_state);
-}
-
 inline static void slow(const int cur_tac, const float cur_erpm)
 {
-	slow_state(cur_tac, cur_erpm, config.slow_erpm, SLOW);
+	speed_state(cur_tac, cur_erpm, config.slow_erpm, SLOW);
 }
 
 inline static void manual_slow(const int cur_tac, const float cur_erpm)
@@ -1735,29 +1726,23 @@ void app_custom_configure(app_configuration *conf)
 	(void)conf;
 }
 
-// The same code for unwinding, rewinding and pulling states
-// Returns true on transition
-static bool brake_or_slowing(const int cur_tac, const int abs_tac)
+// Swithes to BRAKING / SLOWING if needed. Returns true if swithed
+static bool brake_or_slowing(const int cur_tac)
 {
 	// We are in the braking range?
-	if (abs_tac <= config.braking_length)
+	if (cur_tac >= -config.braking_length)
 	{
 		braking(cur_tac);
 		return true;
 	}
 
-	// Slowing range and direction to zero?
-	if (abs_tac <= config.braking_length + config.slowing_length)
+	// We are in the slowing range?
+	if (cur_tac >= -(config.braking_length + config.slowing_length))
 	{
 		float erpm = mc_interface_get_rpm();
 
 		// Check direction and erpm to decide about slowing
 		if (cur_tac < 0 && erpm > config.slow_erpm)
-		{
-			slowing(cur_tac, erpm);
-			return true;
-		}
-		else if (cur_tac >= 0 && erpm < -config.slow_erpm)
 		{
 			slowing(cur_tac, erpm);
 			return true;
@@ -1907,7 +1892,7 @@ inline static void process_states(const int cur_tac, const int abs_tac)
 		break;
 	case BRAKING:
 		// Moved to unwinding zone?
-		if (abs_tac > config.braking_length)
+		if (cur_tac < -config.braking_length)
 		{
 			braking_extension(cur_tac);
 			break;
@@ -1926,14 +1911,14 @@ inline static void process_states(const int cur_tac, const int abs_tac)
 		break;
 	case BRAKING_EXTENSION:
 		// Moved to unwinding zone?
-		if (abs_tac > config.braking_length + config.braking_extension_length)
+		if (cur_tac < -(config.braking_length + config.braking_extension_length))
 		{
 			unwinding(cur_tac);
 			break;
 		}
 
 		// Moved to braking zone?
-		if (abs_tac <= config.braking_length)
+		if (abs_tac <= config.braking_length) //todo is it legit to switch to braking_extension with positive tachometer?
 		{
 			braking(cur_tac);
 		}
@@ -1968,7 +1953,7 @@ inline static void process_states(const int cur_tac, const int abs_tac)
 			timeout_reset();
 
 		// Go braking or slowing?
-		if (brake_or_slowing(cur_tac, abs_tac))
+		if (brake_or_slowing(cur_tac))
 			break;
 
 		// Strong unwinding or normal?
@@ -2013,7 +1998,7 @@ inline static void process_states(const int cur_tac, const int abs_tac)
 			timeout_reset();
 
 		// Go braking or slowing?
-		if (brake_or_slowing(cur_tac, abs_tac))
+		if (brake_or_slowing(cur_tac))
 			break;
 
 		// Now use prev_abs_tac as min value
@@ -2030,7 +2015,7 @@ inline static void process_states(const int cur_tac, const int abs_tac)
 		break;
 	case SLOWING:
 		// We are in the braking range?
-		if (abs_tac <= config.braking_length)
+		if (cur_tac >= -config.braking_length)
 		{
 			braking(cur_tac);
 			break;
@@ -2221,7 +2206,7 @@ inline static void process_states(const int cur_tac, const int abs_tac)
 			timeout_reset();
 
 		// Go braking or slowing?
-		if (brake_or_slowing(cur_tac, abs_tac))
+		if (brake_or_slowing(cur_tac))
 			break;
 
 		// Enough time to tight the rope?
@@ -2265,7 +2250,7 @@ inline static void process_states(const int cur_tac, const int abs_tac)
 			timeout_reset();
 
 		// Go braking or slowing?
-		if (brake_or_slowing(cur_tac, abs_tac))
+		if (brake_or_slowing(cur_tac))
 			break;
 
 		// Enough time of weak takeoff pull?
@@ -2294,7 +2279,7 @@ inline static void process_states(const int cur_tac, const int abs_tac)
 			timeout_reset();
 
 		// Go braking or slowing?
-		if (brake_or_slowing(cur_tac, abs_tac))
+		if (brake_or_slowing(cur_tac))
 			break;
 
 #ifdef VERBOSE_TERMINAL
@@ -2459,11 +2444,6 @@ inline static void process_terminal_commands(int *cur_tac, int *abs_tac)
 							state_str(state));
 			break;
 		}
-		if (*cur_tac > config.braking_length) {
-			commands_printf("%s: -- Can't switch to UNWINDING -- Positive tachometer value",
-							state_str(state));
-			break;
-		}
 
 		// Possible from manual braking or pulling states
 		switch (state)
@@ -2474,6 +2454,11 @@ inline static void process_terminal_commands(int *cur_tac, int *abs_tac)
 		case TAKEOFF_PULL:
 		case PULL:
 		case FAST_PULL:
+			if (*cur_tac > config.braking_length) {
+				commands_printf("%s: -- Can't switch to UNWINDING -- Positive tachometer value",
+								state_str(state));
+				break;
+			}
 			unwinding(*cur_tac);
 			break;
 
@@ -2545,16 +2530,16 @@ inline static void process_terminal_commands(int *cur_tac, int *abs_tac)
 
 		break;
 	case SET_PRE_PULL:
-		if (*cur_tac > config.braking_length) {
-			commands_printf("%s: -- Can't switch to PRE_PULL -- Positive tachometer value",
-							state_str(state));
-			break;
-		}
 		switch (state)
 		{
 		case BRAKING_EXTENSION:
 		case UNWINDING:
 		case REWINDING:
+			if (*cur_tac > config.braking_length) {
+				commands_printf("%s: -- Can't switch to PRE_PULL -- Positive tachometer value",
+								state_str(state));
+				break;
+			}
 			pre_pull(*cur_tac);
 			break;
 		default:
@@ -2564,14 +2549,14 @@ inline static void process_terminal_commands(int *cur_tac, int *abs_tac)
 
 		break;
 	case SET_TAKEOFF_PULL:
-		if (*cur_tac > config.braking_length) {
-			commands_printf("%s: -- Can't switch to TAKEOFF_PULL -- Positive tachometer value",
-							state_str(state));
-			break;
-		}
 		switch (state)
 		{
 		case PRE_PULL:
+			if (*cur_tac > config.braking_length) {
+				commands_printf("%s: -- Can't switch to TAKEOFF_PULL -- Positive tachometer value",
+								state_str(state));
+				break;
+			}
 			takeoff_pull(*cur_tac);
 			break;
 
@@ -2582,17 +2567,17 @@ inline static void process_terminal_commands(int *cur_tac, int *abs_tac)
 
 		break;
 	case SET_PULL:
-		if (*cur_tac > config.braking_length) {
-			commands_printf("%s: -- Can't switch to PULL -- Positive tachometer value",
-							state_str(state));
-			break;
-		}
 		switch (state)
 		{
 		case BRAKING_EXTENSION:
 		case TAKEOFF_PULL:
 		case UNWINDING:
 		case REWINDING:
+			if (*cur_tac > config.braking_length) {
+				commands_printf("%s: -- Can't switch to PULL -- Positive tachometer value",
+								state_str(state));
+				break;
+			}
 			pull(*cur_tac);
 			break;
 
@@ -2602,14 +2587,14 @@ inline static void process_terminal_commands(int *cur_tac, int *abs_tac)
 
 		break;
 	case SET_FAST_PULL:
-		if (*cur_tac > config.braking_length) {
-			commands_printf("%s: -- Can't switch to FAST_PULL -- Positive tachometer value",
-							state_str(state));
-			break;
-		}
 		switch (state)
 		{
 		case PULL:
+			if (*cur_tac > config.braking_length) {
+				commands_printf("%s: -- Can't switch to FAST_PULL -- Positive tachometer value",
+								state_str(state));
+				break;
+			}
 			fast_pull(*cur_tac);
 			break;
 
