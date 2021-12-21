@@ -1897,6 +1897,12 @@ inline static void process_states(const int cur_tac, const int abs_tac)
 			braking_extension(cur_tac);
 			break;
 		}
+		// Moved to manual braking zone?
+		if (cur_tac > config.braking_length)
+		{
+			manual_brake(cur_tac);
+			break;
+		}
 
 		// Timeout thread will remove braking every second by default
 		// Apply brake again if position changed
