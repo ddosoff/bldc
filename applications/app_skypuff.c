@@ -1336,7 +1336,7 @@ inline static void get_stats(float *erpm, float *motor_amps, float *battery_amps
 	*battery_amps = mc_interface_read_reset_avg_input_current();
 }
 
-inline static void serialize_power_stats(uint8_t *buffer, int32_t *ind, const int cur_tac)
+inline static void append_power_stats(uint8_t *buffer, int32_t *ind, const int cur_tac)
 {
 	float erpm;
 	float motor_amps;
@@ -1351,7 +1351,7 @@ inline static void serialize_power_stats(uint8_t *buffer, int32_t *ind, const in
 	buffer_append_float32(buffer, battery_amps, 1e3, ind);
 }
 
-inline static void serialize_temp_stats(uint8_t *buffer, int32_t *ind)
+inline static void append_temp_stats(uint8_t *buffer, int32_t *ind)
 {
 	float fets_temp = mc_interface_temp_fet_filtered();
 	float motor_temp = mc_interface_temp_motor_filtered();
@@ -1425,6 +1425,31 @@ inline static void save_fault_to_reply_buf(const mc_fault_code f)
 	reply_buf_append_from(buffer, 2);
 }
 
+/**
+ * @brief Get the next replybuf message size
+ * 
+ * @return size_t size of next message
+ */
+inline static size_t get_next_reply_buf_message_size(void) {
+	if (reply_buf_contains == 0)
+		return 0;
+	switch (*reply_buf_tail()) {
+		case (SK_COMM_OUT_OF_LIMITS): {
+			uint8_t message_size = *(reply_buf_tail() + 1);
+			return 1 + 1 + message_size;
+		}
+		case (SK_COMM_FAULT): {
+			return 2;
+		}
+		default: {
+			#ifdef VERBOSE_TERMINAL
+			commands_printf("Cannot read from reply_buf. Unknown message type %d", *reply_buf_tail());
+			#endif
+			return 0;
+		}
+	}
+}
+
 // Send motor mode, speed and current amps as reply to alive command
 inline static void send_stats(const int cur_tac, bool add_temps)
 {
@@ -1434,14 +1459,27 @@ inline static void send_stats(const int cur_tac, bool add_temps)
 
 	buffer[ind++] = add_temps ? SK_COMM_ALIVE_TEMP_STATS : SK_COMM_ALIVE_POWER_STATS;
 
-	serialize_power_stats(buffer, &ind, cur_tac);
+	append_power_stats(buffer, &ind, cur_tac);
 	if (add_temps)
-		serialize_temp_stats(buffer, &ind);
+		append_temp_stats(buffer, &ind);
 
 	if (ind > max_buf_size)
 	{
 		commands_printf("%s: -- ALARMA!!! -- send_stats() max buffer size %d, serialized bufer %d bytes. Memory corrupted!",
 						state_str(state), max_buf_size, ind);
+	}
+
+	// copy messages from reply_buf to buffer until it`s possible
+	while (1) {
+		size_t next_reply_buf_message_size = get_next_reply_buf_message_size();
+		if (next_reply_buf_message_size > 0 && next_reply_buf_message_size < max_buf_size - ind) {
+			uint8_t buffer_for_message[PACKET_MAX_PL_LEN - 1 - 12]; // 1 + 12 bytes is minimal alive package length
+			reply_buf_read_to(buffer_for_message, next_reply_buf_message_size);
+			memcpy(buffer + ind, buffer_for_message, next_reply_buf_message_size);
+			ind += next_reply_buf_message_size;
+		} else {
+			break;
+		}
 	}
 
 	commands_send_app_data(buffer, ind);

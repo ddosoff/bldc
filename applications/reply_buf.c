@@ -6,14 +6,14 @@
 #define REPLY_BUF_SIZE 512
 #define MIN(X,Y) ((X) < (Y) ? (X) : (Y))
 
-uint8_t buf[REPLY_BUF_SIZE];
-uint8_t *head = &buf[0];
-size_t contains;
+uint8_t reply_buf[REPLY_BUF_SIZE];
+uint8_t *reply_buf_head = &reply_buf[0];
+size_t reply_buf_contains;
 
 inline static void reply_buf_clear(void) 
 {
-    head = &buf[0];
-    contains = 0;
+    reply_buf_head = &reply_buf[0];
+    reply_buf_contains = 0;
 }
 
 /*
@@ -23,12 +23,12 @@ inline static void reply_buf_clear(void)
  */
 inline static const uint8_t * reply_buf_end(void)
 {
-    return buf + REPLY_BUF_SIZE;
+    return reply_buf + REPLY_BUF_SIZE;
 }
 
-inline static uint8_t * tail() {
-    uint8_t *temp = head - contains;
-    if (temp >= &buf[0]) {
+inline static uint8_t * reply_buf_tail(void) {
+    uint8_t *temp = reply_buf_head - reply_buf_contains;
+    if (temp >= &reply_buf[0]) {
         return temp;
     }
     return temp + REPLY_BUF_SIZE;
@@ -41,17 +41,17 @@ inline static uint8_t * tail() {
  */
 int reply_buf_read_to(uint8_t dst[], size_t count)
 {
-    if (count > contains)
+    if (count > reply_buf_contains)
         return 0;
 
-    size_t canBeReadTillTheEnd = MIN(reply_buf_end() - tail(), count);
-    memcpy(dst, tail(), canBeReadTillTheEnd);
+    size_t canBeReadTillTheEnd = MIN(reply_buf_end() - reply_buf_tail(), count);
+    memcpy(dst, reply_buf_tail(), canBeReadTillTheEnd);
 
     size_t leftToRead = count - canBeReadTillTheEnd;
     if (leftToRead > 0) {
-        memcpy(dst + canBeReadTillTheEnd, buf, leftToRead);
+        memcpy(dst + canBeReadTillTheEnd, reply_buf, leftToRead);
     }
-    contains -= count;
+    reply_buf_contains -= count;
     return 1;
 }
 
@@ -62,24 +62,23 @@ int reply_buf_read_to(uint8_t dst[], size_t count)
  */
 int reply_buf_append_from(const uint8_t src[], size_t count)
 {
-    if (count > REPLY_BUF_SIZE - contains)
+    if (count > REPLY_BUF_SIZE - reply_buf_contains)
         return 0;   
 
     const uint8_t *bufend = reply_buf_end();
-    size_t appended = 0;
-    size_t canBeAppendedTillTheEnd = MIN(bufend - head, count - appended);
-    memcpy(head, src, canBeAppendedTillTheEnd);
-    head += canBeAppendedTillTheEnd;
+    size_t canBeAppendedTillTheEnd = MIN(bufend - reply_buf_head, count);
+    memcpy(reply_buf_head, src, canBeAppendedTillTheEnd);
+    reply_buf_head += canBeAppendedTillTheEnd;
 
-    if (head == bufend) {
-        head = &buf[0];
+    if (reply_buf_head == bufend) {
+        reply_buf_head = &reply_buf[0];
     }
 
     size_t leftToAppend = count - canBeAppendedTillTheEnd;
     if (leftToAppend > 0) {
-        memcpy(head, src + appended, leftToAppend); 
-        head += leftToAppend;
+        memcpy(reply_buf_head, src + canBeAppendedTillTheEnd, leftToAppend); 
+        reply_buf_head += leftToAppend;
     }
-    contains += count;
+    reply_buf_contains += count;
     return 1;
 }
