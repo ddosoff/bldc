@@ -12,7 +12,7 @@ size_t contains;
 
 inline static void reply_buf_clear(void) 
 {
-	head = &buf[0];
+    head = &buf[0];
     contains = 0;
 }
 

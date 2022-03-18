@@ -45,6 +45,7 @@
 //#define VERBOSE_TERMINAL
 
 #include "app_skypuff.h"
+#include "reply_buf.c"
 
 /*
 	This application turns VESC into paragliding winch controller.
@@ -55,13 +56,9 @@
 
 	Skypuff can't use VESC timeout because of smooth pull release mechanism.
 
-	From 1 March 2020 Skypuff UI use binary protocol only. I tried to minimize packet sizes due to slow radio links.
+	From 1 March 2020 Skypuff UI uses binary protocol only. I tried to minimize packet sizes due to slow radio links.
 
-	From 6 November 2020 protocol will be changed to request -> reply scheme
-	due to half-duplex nature of the radio links.
-
-	Asynchronous events will be queued to the buffer and sent with reply only.
-
+	Plans:
 	All terminal output will be moved under VERBOSE_TERMINAL define. 
 	Only critical logic/hardware errors will be printed to terminal imediatelly.
 
@@ -665,19 +662,19 @@ inline static void smooth_motor_current(const int cur_tac, const int abs_tac, co
 }
 
 // Helper functions to check limits
-inline static void send_out_of_limits(const char *format, ...)
+inline static void save_out_of_limits_error(const char *format, ...)
 {
 	static const int out_of_limits_max_buf_size = PACKET_MAX_PL_LEN - 1; // 1 byte for COMM_CUSTOM_APP_DATA
 	static uint8_t out_of_limits_buf[PACKET_MAX_PL_LEN - 1];
-	int32_t ind = 0;
-	out_of_limits_buf[ind++] = SK_COMM_OUT_OF_LIMITS;
 
 	va_list args;
 	va_start(args, format);
-	int32_t printed = vsnprintf((char *)(out_of_limits_buf + ind), out_of_limits_max_buf_size - ind, format, args);
+	int32_t printed = vsnprintf((char *)(out_of_limits_buf + 2), out_of_limits_max_buf_size - 1, format, args);
 	va_end(args);
+	out_of_limits_buf[0] = SK_COMM_OUT_OF_LIMITS;
+	out_of_limits_buf[1] = printed; // save message length to buffer
 
-	commands_send_app_data(out_of_limits_buf, ind + printed); // Not necessary to send last NULL
+	reply_buf_append_from(out_of_limits_buf, 1 + 1 + printed);
 
 #ifdef VERBOSE_TERMINAL
 	commands_printf("%s: %s %s", state_str(state), limits_wrn, (char *)(out_of_limits_buf + ind));
@@ -690,7 +687,7 @@ inline static bool is_int_out_of_limits(const char *name, const char *units,
 	if (val >= min && val <= max)
 		return false;
 
-	send_out_of_limits("%s %d %s is out of limits [%d, %d]",
+	save_out_of_limits_error("%s %d %s is out of limits [%d, %d]",
 					   name, val, units, min, max);
 
 	return true;
@@ -702,7 +699,7 @@ inline static bool is_float_out_of_limits(const char *name, const char *units,
 	if (val >= min && val <= max)
 		return false;
 
-	send_out_of_limits("%s %.5f %s is out of limits [%.5f, %.5f]",
+	save_out_of_limits_error("%s %.5f %s is out of limits [%.5f, %.5f]",
 					   name, (double)val, units, (double)min, (double)max);
 	return true;
 }
@@ -713,7 +710,7 @@ inline static bool is_pull_out_of_limits(const char *name,
 	if (amps >= min && amps <= max)
 		return false;
 
-	send_out_of_limits("%s %.1fA (%.2fKg) is out of limits [%.1fA (%.2fKg), %.1fA (%.2fKg)]",
+	save_out_of_limits_error("%s %.1fA (%.2fKg) is out of limits [%.1fA (%.2fKg), %.1fA (%.2fKg)]",
 					   name,
 					   (double)amps, (double)(amps / config.amps_per_kg),
 					   (double)min, (double)(min / config.amps_per_kg),
@@ -727,7 +724,7 @@ inline static bool is_distance_out_of_limits(const char *name,
 	if (steps >= min && steps <= max)
 		return false;
 
-	send_out_of_limits("%s %d steps (%.2f meters) is out of limits [%d (%.2fm), %d (%.2fm)]",
+	save_out_of_limits_error("%s %d steps (%.2f meters) is out of limits [%d (%.2fm), %d (%.2fm)]",
 					   name,
 					   steps, (double)tac_steps_to_meters(steps),
 					   min, (double)tac_steps_to_meters(min),
@@ -741,7 +738,7 @@ inline static bool is_speed_out_of_limits(const char *name,
 	if (erpm >= min && erpm <= max)
 		return false;
 
-	send_out_of_limits("%s %.1f ERPM (%.1f m/s) is out of limits [%.1f (%.1f m/s), %.1f (%.1f m/s)]",
+	save_out_of_limits_error("%s %.1f ERPM (%.1f m/s) is out of limits [%.1f (%.1f m/s), %.1f (%.1f m/s)]",
 					   name,
 					   (double)erpm, (double)erpm_to_ms(erpm),
 					   (double)min, (double)erpm_to_ms(min),
@@ -753,7 +750,7 @@ static bool is_drive_config_out_of_limits(const skypuff_drive *drv)
 {
 	if (drv->motor_poles % 2)
 	{
-		send_out_of_limits("motor_poles: %dp must be odd", drv->motor_poles);
+		save_out_of_limits_error("motor_poles: %dp must be odd", drv->motor_poles);
 		return true;
 	}
 
@@ -1422,17 +1419,10 @@ inline static void send_conf(void)
 	commands_send_app_data(buffer, ind);
 }
 
-// Send fault to UI
-inline static void send_fault(const mc_fault_code f)
+inline static void save_fault_to_reply_buf(const mc_fault_code f)
 {
-	const int max_buf_size = PACKET_MAX_PL_LEN - 1; // 1 byte for COMM_CUSTOM_APP_DATA
-	uint8_t buffer[max_buf_size];
-	int32_t ind = 0;
-
-	buffer[ind++] = SK_COMM_FAULT;
-	buffer[ind++] = f;
-
-	commands_send_app_data(buffer, ind);
+	uint8_t buffer[2] = {SK_COMM_FAULT, f};
+	reply_buf_append_from(buffer, 2);
 }
 
 // Send motor mode, speed and current amps as reply to alive command
@@ -1757,11 +1747,10 @@ inline static void update_stats_check_faults(void)
 	UTILS_LP_FAST(v_in_filtered, GET_INPUT_VOLTAGE(), 0.1);
 	mc_fault_code f = mc_interface_get_fault();
 
-	// Will print new fault immediately
 	if (f != prev_printed_fault)
 	{
 		prev_printed_fault = f;
-		send_fault(f);
+		save_fault_to_reply_buf(f);
 	}
 }
 
