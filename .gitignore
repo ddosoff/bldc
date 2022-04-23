@@ -16,3 +16,4 @@ workspace.code-workspace
 *.pro.shared
 
 .vscode
+.idea
