@@ -26,6 +26,10 @@
 #define HW_NAME					"UBOX_V2_100"
 #elif defined (HW_UBOX_SINGLE_100)
 #define HW_NAME					"UBOX_SINGLE_100"
+#elif defined (HW_UBOX_SINGLE_80)
+#define HW_NAME					"UBOX_SINGLE_80"
+#elif defined (HW_UBOX_SINGLE_85_200)
+#define HW_NAME					"UBOX_SINGLE_85_200"
 #else
 #error "Must define hardware type"
 #endif
@@ -238,7 +242,7 @@
 #define MCCONF_L_MIN_VOLTAGE			12.0		// Minimum input voltage
 #endif
 #ifndef MCCONF_L_MAX_VOLTAGE
-#define MCCONF_L_MAX_VOLTAGE			96.0	// Maximum input voltage
+#define MCCONF_L_MAX_VOLTAGE			93.0	// Maximum input voltage
 #endif
 #ifndef MCCONF_DEFAULT_MOTOR_TYPE
 #define MCCONF_DEFAULT_MOTOR_TYPE		MOTOR_TYPE_FOC
@@ -260,10 +264,28 @@
 #endif
 
 // Setting limits
-#define HW_LIM_CURRENT			-135.0, 135.0
-#define HW_LIM_CURRENT_IN		-135.0, 135.0
-#define HW_LIM_CURRENT_ABS		0.0, 180.0
-#define HW_LIM_VIN				11.0, 97.0
+#ifdef HW_UBOX_SINGLE_85_200
+	#define HW_LIM_CURRENT			-300, 300.0
+	#define HW_LIM_CURRENT_IN		-300.0, 300.0
+	#define HW_LIM_CURRENT_ABS		0.0, 420.0
+#elif defined HW_UBOX_SINGLE_80
+	#define HW_LIM_CURRENT			-150, 150.0
+	#define HW_LIM_CURRENT_IN		-150.0, 150.0
+	#define HW_LIM_CURRENT_ABS		0.0, 210.0
+#else
+	#define HW_LIM_CURRENT			-135.0, 135.0
+	#define HW_LIM_CURRENT_IN		-135.0, 135.0
+	#define HW_LIM_CURRENT_ABS		0.0, 180.0
+#endif
+
+#ifdef HW_UBOX_SINGLE_80
+	#define HW_LIM_VIN				11.0, 85.0
+#elif defined HW_UBOX_SINGLE_85_200
+	#define HW_LIM_VIN				11.0, 85.0
+#else
+	#define HW_LIM_VIN				11.0, 95.0
+#endif
+
 #define HW_LIM_ERPM				-200e3, 200e3
 #define HW_LIM_DUTY_MIN			0.0, 0.1
 #define HW_LIM_DUTY_MAX			0.0, 0.99
