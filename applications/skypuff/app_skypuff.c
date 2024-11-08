@@ -22,6 +22,8 @@
 #include "hal.h"
 
 #include "commands.h"
+#include "comm_can.h"
+#include "mempools.h"
 #include "hw.h"
 #include "mc_interface.h"
 #include "terminal.h"
@@ -80,6 +82,17 @@ const int smooth_max_step_delay = 100;
 const int strong_unwinding_period = 2000; // 2 secs of strong unwinding current after entering unwinding
 
 const char *limits_wrn = "-- CONFIGURATION IS OUT OF LIMITS --";
+
+// This is binary LISP command for STR500 to send via CAN bus to ESP32 Express module to switch ON and OFF for 0.5 secs guillotine DC-DC output 2 (GPIO 8).
+/* (rcode-run-noret 2 '(progn
+                           (gpio-write 8  1)
+                           (sleep 0.5)
+                           (gpio-write 8  0)
+                       ))
+*/
+const char *lisp_guillotine_command = "\x01\x05\xFF\xFF\xFF\xFF\x01\x01\x03\x70\x72\x6F\x67\x6E\x00\x01\x01\x03\x67\x70\x69\x6F\x2D\x77\x72\x69\x74\x65\x00\x01\x05\x00\x00\x00\x08\x01\x05\x00\x00\x00\x01\x03\x6E\x69\x6C\x00\x01\x01\x03\x73\x6C\x65\x65\x70\x00\x01\x09\x3F\x00\x00\x00\x03\x6E\x69\x6C\x00\x01\x01\x03\x67\x70\x69\x6F\x2D\x77\x72\x69\x74\x65\x00\x01\x05\x00\x00\x00\x08\x01\x05\x00\x00\x00\x00\x03\x6E\x69\x6C\x00\x03\x6E\x69\x6C\x00\x03\x6E\x69\x6C\x00";
+const int lisp_guillotine_command_len = 107;
+const int vesc_express_can_id = 2;
 
 // Threads
 static THD_FUNCTION(my_thread, arg);
@@ -1396,8 +1409,17 @@ static void antisex_init(void) {
 // Called when the custom application is started. Start our
 // threads here and set up callbacks.
 void app_custom_start(void) {
-	// Set guillotine switch to TTL output mode
-	set_adc2_pushpull();
+	// Different guillotine initialization for different hardware
+	#ifdef HW_100_250_H_
+		// Set guillotine switch to TTL output mode
+		set_adc2_pushpull();
+		#warning "Using VESC 100250 Guillotine code"
+	#elif defined(HWSTR500)
+		// Need always to set 2 to the VESC Express board
+		#warning "Don't forget to set VESC Express board CAN_ID to 2."
+	#else
+		#error "Skypuff compilling to unknown HARDWARE. Check guillotine code for your hardware"
+	#endif
 
 	// Enable WiFi / Radio controll
 	app_uartcomm_start(UART_PORT_COMM_HEADER);
@@ -1472,10 +1494,10 @@ void app_custom_start(void) {
 			"force",
 			"Set SkyPUFF pull force",
 			"[kg]", terminal_set_pull_force);
-    terminal_register_command_callback(
-            "adc2_tick",
-            "Cut the rope with guillotine",
-            "", terminal_cut_the_line);
+	terminal_register_command_callback(
+			"guillotine",
+			"Cut the rope with guillotine",
+			"", terminal_cut_the_line);
 	terminal_register_command_callback(
 			"measure_spool",
 			"Measure spool virtual mass spinning motor backward and forward with specified force during specified time and measurments with specified interval",
@@ -2816,12 +2838,13 @@ void terminal_cut_the_line(int argc, const char **argv) {
 	(void) argc;
 	(void) argv;
 
+#ifdef HW_100_250_H_
 	const int delay = 1, loops = 6;
 
-#ifdef VERBOSE_TERMINAL
-	commands_printf("%s: -- ADC2 %d impulses with %d delay",
+	#ifdef VERBOSE_TERMINAL
+		commands_printf("%s: -- ADC2 %d impulses with %d delay",
 					state_str(state), loops, delay);
-#endif
+	#endif
 
 	for (int i = 0; i < loops; i++) {
 		palSetPad(HW_ADC_EXT2_GPIO, HW_ADC_EXT2_PIN);
@@ -2829,6 +2852,19 @@ void terminal_cut_the_line(int argc, const char **argv) {
 		palClearPad(HW_ADC_EXT2_GPIO, HW_ADC_EXT2_PIN);
 		chThdSleepMilliseconds(delay);
 	}
+#elif defined(HWSTR500)
+	#ifdef VERBOSE_TERMINAL
+		commands_printf("%s: -- Sending CAN Cut command",
+						state_str(state));
+	#endif
+	
+	uint8_t *buf = mempools_get_packet_buffer();
+        buf[0] = COMM_LISP_RMSG;
+        buf[1] = 0;
+        memcpy(buf + 2, lisp_guillotine_command, lisp_guillotine_command_len);
+        comm_can_send_buffer(vesc_express_can_id, buf, lisp_guillotine_command_len + 2, 2);
+        mempools_free_packet_buffer(buf);
+#endif
 }
 
 
