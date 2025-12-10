@@ -1414,6 +1414,8 @@ void app_custom_start(void) {
 		// Set guillotine switch to TTL output mode
 		set_adc2_pushpull();
 		#warning "Using VESC 100250 Guillotine code"
+	#elif defined(USE_SERVO_GUILLOTINE)
+		#warning "Using SERVO guillotine implementation"
 	#elif defined(HWSTR500)
 		// Need always to set 2 to the VESC Express board
 		#warning "Don't forget to set VESC Express board CAN_ID to 2."
@@ -2852,6 +2854,8 @@ void terminal_cut_the_line(int argc, const char **argv) {
 		palClearPad(HW_ADC_EXT2_GPIO, HW_ADC_EXT2_PIN);
 		chThdSleepMilliseconds(delay);
 	}
+#elif defined(USE_SERVO_GUILLOTINE)
+#warning "Implement servo CUT method"
 #elif defined(HWSTR500)
 	#ifdef VERBOSE_TERMINAL
 		commands_printf("%s: -- Sending CAN Cut command",
