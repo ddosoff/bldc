@@ -28,7 +28,12 @@
 
 #ifdef HW_SHUTDOWN_CUSTOM
 // Do nothing. All shutdown functionality is handled in the hardware file.
+
+#warning "HW_SHUTDOWN_CUSTOM"
+
 #elif defined(HW_SHUTDOWN_HOLD_ON)
+
+#warning "HW_SHUTDOWN_HOLD_ON"
 
 // Private variables
 bool volatile m_button_pressed = false;
@@ -123,7 +128,7 @@ static THD_FUNCTION(shutdown_thread, arg) {
 			continue;
 		}
 
-		bool sample = HW_SAMPLE_SHUTDOWN();
+		bool sample = false; // HW_SAMPLE_SHUTDOWN();
 		chMtxUnlock(&m_sample_mutex);
 		bool clicked = m_button_pressed && !sample;
 		m_button_pressed = sample;
@@ -137,12 +142,14 @@ static THD_FUNCTION(shutdown_thread, arg) {
 		switch (conf->shutdown_mode) {
 		case SHUTDOWN_MODE_ALWAYS_OFF:
 #ifdef HW_SHUTDOWN_NO
+#warning "HW_SHUTDOWN_NO"
 			if (m_button_pressed) {
 				HW_SHUTDOWN_HOLD_ON();
 			} else {
 				do_shutdown(false);
 			}
 #else
+#warning "HW_SHUTDOWN_YES"
 			if (m_button_pressed) {
 				gates_disabled_here = do_shutdown(true);
 			}
@@ -160,6 +167,7 @@ static THD_FUNCTION(shutdown_thread, arg) {
 			break;
 		}
 
+		HW_SHUTDOWN_HOLD_ON();
 		switch (conf->shutdown_mode) {
 		case SHUTDOWN_MODE_ALWAYS_OFF:
 		case SHUTDOWN_MODE_ALWAYS_ON: {
@@ -217,6 +225,7 @@ static THD_FUNCTION(shutdown_thread, arg) {
 }
 
 #else // HARDWARE WITHOUT POWER SWITCH 
+#warning "HARDWARE WITHOUT POWER SWITCH"
 // just saving backup data, no actual shutdown
 
 // Private variables
