@@ -149,7 +149,8 @@ static THD_FUNCTION(shutdown_thread, arg) {
 			continue;
 		}
 
-		bool sample = sw_samples_t > sw_samples_f;
+		// bool sample = sw_samples_t > sw_samples_f;
+		bool sample = false;
 		bool clicked = m_button_pressed && !sample;
 		m_button_pressed = sample;
 
