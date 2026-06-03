@@ -7,7 +7,16 @@
  * Any received command will increment so called
  * alive timeout (loop iterations count) by this value
  */
-const int alive_timeout_increment = 1400; // Around 1.4 seconds
+const int alive_timeout_increment = 3000; // 3 seconds
+
+/**
+ * Maximum allowed deviation of the battery voltage calibration
+ * coefficient (v_bat_k) from 1.0, as a fraction.
+ * 0.15 => v_bat_k is accepted only within [0.85 .. 1.15].
+ * Used to reject bad terminal input and to reset a corrupted
+ * value read from EEPROM back to the neutral 1.0.
+ */
+const float v_bat_k_max_deviation = 0.15f;
 
 // Part of motor configuration needed by skypuff UI
 typedef struct {

@@ -108,6 +108,7 @@ static void terminal_set_example_conf(int argc, const char **argv);
 static void terminal_alive_forever(int argc, const char **argv);
 static void terminal_set_state(int argc, const char **argv);
 static void terminal_set_pull_force(int argc, const char **argv);
+static void terminal_set_v_bat_k(int argc, const char **argv);
 static void terminal_cut_the_line(int argc, const char **argv);
 static void terminal_measure_spool(int argc, const char **argv);
 
@@ -127,11 +128,13 @@ static int prev_print;					 // Loop counter value of the last state print
 static int prev_printed_tac;			 // Do not print the same position
 static mc_fault_code prev_printed_fault; // Do not print (send) the same fault many times
 static float v_in_filtered;				 // Average for v_in
+static float v_bat_k = 1.0f;			 // Battery voltage calibration: real = GET_INPUT_VOLTAGE() * v_bat_k
 static float erpm_filtered;				 // For speed up states
 static int alive_until;					 // loop iteration number up to which the winch is active
 static bool alive_forever;		         // if true then alive_until doesnt make sense
 static int state_start_time;			 // Count the duration of state
 static float terminal_pull_kg;			 // Pulling force to set
+static float terminal_v_bat_k;			 // Battery voltage calibration to set
 static int unwinding_start_step;         // loop_step when entering UNWINDING
 
 // Prevent long time oscilations
@@ -192,6 +195,7 @@ typedef enum {
 	SEND_POWER_STATS,
 	SEND_TEMP_STATS,
 	SET_SMOOTH,
+	SET_V_BAT_K,
 } skypuff_main_loop_command;
 
 static volatile skypuff_main_loop_command main_loop_command;
@@ -858,6 +862,28 @@ static bool is_config_out_of_limits(const skypuff_config *conf) {
 }
 
 // EEPROM
+// Dedicated custom EEPROM cell for v_bat_k, kept clear of the skypuff_config
+// block (which occupies addresses 0..sizeof(config)/4 - 1).
+const int eeprom_addr_v_bat_k = 100;
+
+// Read battery voltage calibration from EEPROM. Falls back to the neutral 1.0
+// when the cell was never written (fresh board) or holds an out of range value.
+static void read_v_bat_k_from_eeprom(void) {
+	eeprom_var e;
+	e.as_float = 1.0f; // Kept untouched if the cell does not exist yet
+	conf_general_read_eeprom_var_custom(&e, eeprom_addr_v_bat_k);
+
+	v_bat_k = e.as_float;
+	if (v_bat_k < 1.0f - v_bat_k_max_deviation || v_bat_k > 1.0f + v_bat_k_max_deviation)
+		v_bat_k = 1.0f;
+}
+
+static void store_v_bat_k_to_eeprom(void) {
+	eeprom_var e;
+	e.as_float = v_bat_k;
+	conf_general_store_eeprom_var_custom(&e, eeprom_addr_v_bat_k);
+}
+
 static void store_config_to_eeprom(const skypuff_config *c) {
 	mc_interface_release_motor();
 
@@ -1172,8 +1198,9 @@ inline static void serialize_scales(uint8_t *buffer, int32_t *ind) {
 	buffer_append_float16(buffer, mc_conf->l_temp_fet_start, 1e1, ind);
 	buffer_append_float16(buffer, mc_conf->l_temp_motor_start, 1e1, ind);
 	// battery voltage
-	buffer_append_float32(buffer, fmax(mc_conf->l_min_vin, mc_conf->l_battery_cut_start), 1e2, ind);
-	buffer_append_float32(buffer, mc_conf->l_max_vin, 1e2, ind);
+	// mc_conf holds raw thresholds; multiply by v_bat_k to show real volts matching v_in_filtered
+	buffer_append_float32(buffer, (float) fmax(mc_conf->l_min_vin, mc_conf->l_battery_cut_start) * v_bat_k, 1e2, ind);
+	buffer_append_float32(buffer, mc_conf->l_max_vin * v_bat_k, 1e2, ind);
 }
 
 inline static void serialize_drive(uint8_t *buffer, int32_t *ind) {
@@ -1416,6 +1443,8 @@ void app_custom_start(void) {
 		#warning "Using VESC 100250 Guillotine code"
 	#elif defined(USE_SERVO_GUILLOTINE)
 		#warning "Using SERVO guillotine implementation"
+	#elif defined(HW60_IS_MK4)
+		#warning "Using HW60_IS_MK4"
 	#elif defined(HWSTR500)
 		// Need always to set 2 to the VESC Express board
 		#warning "Don't forget to set VESC Express board CAN_ID to 2."
@@ -1440,7 +1469,7 @@ void app_custom_start(void) {
 	alive_forever = false;
 	prev_abs_tac = 0;
 	prev_erpm = 0;
-	v_in_filtered = GET_INPUT_VOLTAGE();
+	v_in_filtered = GET_INPUT_VOLTAGE() * v_bat_k;
     main_loop_command = DO_NOTHING;
     main_loop_command_from_terminal = true; // Assume we work from terminal by default
 	stop_now = false;
@@ -1448,6 +1477,7 @@ void app_custom_start(void) {
 	smooth_motor_release();
 
 	read_config_from_eeprom(&config);
+	read_v_bat_k_from_eeprom();
 
 	measurement_init();
 	antisex_init();
@@ -1497,6 +1527,10 @@ void app_custom_start(void) {
 			"Set SkyPUFF pull force",
 			"[kg]", terminal_set_pull_force);
 	terminal_register_command_callback(
+			"set_v_bat_k",
+			"Set battery voltage calibration coefficient (real = measured * k)",
+			"[k]", terminal_set_v_bat_k);
+	terminal_register_command_callback(
 			"guillotine",
 			"Cut the rope with guillotine",
 			"", terminal_cut_the_line);
@@ -1530,6 +1564,7 @@ void app_custom_stop(void) {
 	terminal_unregister_callback(terminal_alive_forever);
 	terminal_unregister_callback(terminal_set_state);
 	terminal_unregister_callback(terminal_set_pull_force);
+	terminal_unregister_callback(terminal_set_v_bat_k);
 #ifdef DEBUG_SMOOTH_MOTOR
 	terminal_unregister_callback(terminal_smooth);
 #endif
@@ -1568,7 +1603,7 @@ static bool brake_or_slowing(const int cur_tac) {
 }
 
 inline static void update_stats_check_faults(void) {
-	UTILS_LP_FAST(v_in_filtered, GET_INPUT_VOLTAGE(), 0.1);
+	UTILS_LP_FAST(v_in_filtered, GET_INPUT_VOLTAGE() * v_bat_k, 0.1);
 	mc_fault_code f = mc_interface_get_fault();
 
 	if (f != prev_printed_fault) {
@@ -2169,6 +2204,38 @@ inline static void print_conf(const int cur_tac) {
 					!is_alive() ? "communication timeout" : "no timeout");
 }
 
+// Set mc_configuration battery cut limits according to battery type and cells.
+// Thresholds are chemistry values in REAL volts, but the VESC core compares them
+// against the RAW ADC reading, so we divide by v_bat_k (raw = real / v_bat_k).
+// Always recomputed from chemistry constants, so it is safe to call repeatedly.
+// Unknown battery types (including 255) are left untouched, as in the original code.
+static void apply_battery_voltage_limits(mc_configuration *conf,
+										 BATTERY_TYPE type, int cells, float k) {
+	switch (type) {
+		case BATTERY_TYPE_LIION_3_0__4_2:
+			conf->l_battery_cut_start = 3.1 * (float) cells / k;
+			conf->l_battery_cut_end = 3.0 * (float) cells / k;
+			conf->l_max_vin = 4.25 * (float) cells / k;
+			conf->si_battery_type = type;
+			conf->si_battery_cells = cells;
+			break;
+		case BATTERY_TYPE_LIIRON_2_6__3_6:
+			conf->l_battery_cut_start = 2.7 * (float) cells / k;
+			conf->l_battery_cut_end = 2.6 * (float) cells / k;
+			conf->l_max_vin = 3.65 * (float) cells / k;
+			conf->si_battery_type = type;
+			conf->si_battery_cells = cells;
+			break;
+
+		default:
+			// Do not touch battery if we do not know the type
+			commands_printf("%s: -- apply_battery_voltage_limits(): unknown battery type %d, "
+							"cut limits left unchanged (v_bat_k affects display only)",
+							state_str(state), (int) type);
+			break;
+	}
+}
+
 inline static void process_terminal_commands(int *cur_tac, int *abs_tac) {
 	// In case of new command during next switch
 	skypuff_main_loop_command prev_command = main_loop_command;
@@ -2439,27 +2506,10 @@ inline static void process_terminal_commands(int *cur_tac, int *abs_tac) {
 						new_mc_conf.si_gear_ratio = set_drive.gear_ratio;
 						new_mc_conf.si_wheel_diameter = set_drive.wheel_diameter;
 
-						// Update voltage limits according to battery type and cells
-						switch (set_drive.battery_type) {
-							case BATTERY_TYPE_LIION_3_0__4_2:
-								new_mc_conf.l_battery_cut_start = 3.1 * (float) set_drive.battery_cells;
-								new_mc_conf.l_battery_cut_end = 3.0 * (float) set_drive.battery_cells;
-								new_mc_conf.l_max_vin = 4.25 * (float) set_drive.battery_cells;
-								new_mc_conf.si_battery_type = set_drive.battery_type;
-								new_mc_conf.si_battery_cells = set_drive.battery_cells;
-								break;
-							case BATTERY_TYPE_LIIRON_2_6__3_6:
-								new_mc_conf.l_battery_cut_start = 2.7 * (float) set_drive.battery_cells;
-								new_mc_conf.l_battery_cut_end = 2.6 * (float) set_drive.battery_cells;
-								new_mc_conf.l_max_vin = 3.65 * (float) set_drive.battery_cells;
-								new_mc_conf.si_battery_type = set_drive.battery_type;
-								new_mc_conf.si_battery_cells = set_drive.battery_cells;
-								break;
-
-							default:
-								// Do not touch battery if we do not know the type
-								break;
-						}
+						// Update voltage limits according to battery type and cells,
+						// dividing by v_bat_k so the VESC core cuts at the real voltage
+						apply_battery_voltage_limits(&new_mc_conf, set_drive.battery_type,
+													 set_drive.battery_cells, v_bat_k);
 
 						// TODO: move this code into separate function and use from commands.c
 						conf_general_store_mc_configuration(&new_mc_conf, false);
@@ -2515,6 +2565,34 @@ inline static void process_terminal_commands(int *cur_tac, int *abs_tac) {
 					break;
 			}
 
+			break;
+		case SET_V_BAT_K:
+			// Changing calibration rewrites mc_configuration cut limits, so only
+			// allow it from a safe, stopped state.
+			if (state != MANUAL_BRAKING) {
+				save_custom_msg("Can't set v_bat_k. Only possible from MANUAL_BRAKING state");
+				break;
+			}
+
+			// terminal_v_bat_k is already range checked in terminal_set_v_bat_k()
+			v_bat_k = terminal_v_bat_k;
+			store_v_bat_k_to_eeprom();
+
+			// Recompute battery cut limits with the new coefficient so the VESC
+			// core keeps cutting at the real voltage. Always from chemistry constants.
+			{
+				mc_configuration new_mc_conf = *mc_conf;
+				apply_battery_voltage_limits(&new_mc_conf, mc_conf->si_battery_type,
+											 mc_conf->si_battery_cells, v_bat_k);
+				conf_general_store_mc_configuration(&new_mc_conf, false);
+				mc_interface_set_configuration(&new_mc_conf);
+				mc_conf = mc_interface_get_configuration();
+			}
+
+			save_custom_msg("%s: -- Battery voltage calibration set to %.3f", state_str(state), (double) v_bat_k);
+
+			// Announce updated scales and live voltage to the UI
+			send_conf();
 			break;
 		default:
             save_custom_msg("SkyPUFF: unknown terminal command, exiting!");
@@ -2686,6 +2764,31 @@ static void terminal_set_pull_force(int argc, const char **argv) {
 	// Limits will be checked in process_terminal_commands()
 	terminal_pull_kg = kg;
     main_loop_command = SET_PULL_FORCE;
+}
+
+static void terminal_set_v_bat_k(int argc, const char **argv) {
+	if (argc < 2) {
+		commands_printf("%s: -- Command requires one argument -- 'set_v_bat_k 1.05' "
+						"multiplies measured battery voltage by 1.05", state_str(state));
+		return;
+	}
+
+	float k;
+	if (sscanf(argv[1], "%f", &k) == EOF) {
+		commands_printf("%s: -- Can't parse '%s' as coefficient value.",
+						state_str(state), argv[1]);
+		return;
+	}
+
+	// Reject from terminal any value that corrects voltage by more than the allowed deviation
+	if (k < 1.0f - v_bat_k_max_deviation || k > 1.0f + v_bat_k_max_deviation) {
+		commands_printf("%s: -- Coefficient %.3f is out of allowed +-%.0f%% range, ignored.",
+						state_str(state), (double) k, (double) (v_bat_k_max_deviation * 100));
+		return;
+	}
+
+	terminal_v_bat_k = k;
+	main_loop_command = SET_V_BAT_K;
 }
 
 // Helper function to uppercase terminal commands
