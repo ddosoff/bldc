@@ -2768,8 +2768,10 @@ static void terminal_set_pull_force(int argc, const char **argv) {
 
 static void terminal_set_v_bat_k(int argc, const char **argv) {
 	if (argc < 2) {
-		commands_printf("%s: -- Command requires one argument -- 'set_v_bat_k 1.05' "
-						"multiplies measured battery voltage by 1.05", state_str(state));
+		commands_printf("%s: -- Current battery voltage calibration is %.3f. "
+						"Specify a parameter to set a new value, e.g. 'set_v_bat_k 1.05' "
+						"multiplies measured battery voltage by 1.05",
+						state_str(state), (double) v_bat_k);
 		return;
 	}
 
