@@ -79,6 +79,11 @@ typedef enum
 	Smooth motor code uses config.amps_per_sec as force changing speed and
 	smooth_max_step_delay as maximum step delay.
 
+	While decreasing current magnitude, hold the setpoint when filtered tachometer
+	acceleration is below config.antisex_acceleration_off_mss. Resume strictly above
+	that threshold, without making up for the time spent paused. This also applies
+	to the current decrease before braking.
+
 	Always brake instantly if braking zone.
 
 	Functions started with 'smooth_' prefix control the motor via VESC mc_interface

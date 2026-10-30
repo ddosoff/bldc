@@ -78,7 +78,7 @@
 
 const int short_print_delay = 500; // 0.5s, measured in control loop counts
 const int long_print_delay = 3000;
-const int smooth_max_step_delay = 100;
+const int smooth_max_step_delay = 20;
 const int strong_unwinding_period = 2000; // 2 secs of strong unwinding current after entering unwinding
 
 const char *limits_wrn = "-- CONFIGURATION IS OUT OF LIMITS --";
@@ -146,8 +146,7 @@ static systime_t antisex_start_time;  // Point in time when pull reduce activate
 
 // Speed and acceleration maesurements based on tachometer value is more accurate then mc_interface_get_rpm()
 static systime_t measurement_delay = MS2ST(5); // Measure speed based on tachometer value
-static float measurement_speed_filter_period_secs =
-		(float) 50.0 / (float) 1000.0; // Period of tachometer speed measurements to overage
+static float measurement_speed_filter_period_secs = 0.050f; // Shared 50 ms filter for tachometer speed and acceleration
 
 // Buffer to collect async messages to be appended to the next stats response
 uint8_t reply_buf[REPLY_BUF_SIZE];
@@ -217,6 +216,7 @@ static smooth_motor_state terminal_motor_state;
 static int next_smooth_motor_adjustment;	// Loop count for next motor adjustment
 static int prev_smooth_motor_adjustment;	// Loop count of previous motor adjustment
 static float amps_per_sec;					// Speed to change force during smooth motor adjustments, calculated
+static bool smooth_motor_paused;       // Hold a current decrease while acceleration is too low
 
 /*
 	Skypuff relies on system drive settings to calculate rope meters
@@ -385,6 +385,7 @@ inline static void smooth_motor_instant_brake(void) {
 
 	next_smooth_motor_adjustment = INT_MAX;
 	prev_smooth_motor_adjustment = loop_step;
+	smooth_motor_paused = false;
 	return;
 }
 
@@ -402,6 +403,7 @@ inline static void smooth_motor_instant_current(void) {
 
 	next_smooth_motor_adjustment = INT_MAX;
 	prev_smooth_motor_adjustment = loop_step;
+	smooth_motor_paused = false;
 	return;
 }
 
@@ -448,6 +450,21 @@ inline static float smooth_calc_step(const float c1,
 									 const float c2,
 									 const int prev_adjustment_delay,
 									 int *next_delay) {
+	bool decreasing = fabsf(c2) < fabsf(c1);
+	bool was_paused = smooth_motor_paused;
+	float acceleration = measurement.filtered_acceleration_tac_mss;
+	float acceleration_off = config.antisex_acceleration_off_mss;
+	smooth_motor_paused = decreasing && (acceleration < acceleration_off ||
+			(was_paused && acceleration <= acceleration_off));
+
+	// Hold below the threshold; an existing pause also holds at equality.
+	// On resume, discard the elapsed pause before taking another normal step.
+	// The caller records this update time even when the current stays unchanged.
+	if (smooth_motor_paused || (was_paused && decreasing)) {
+		*next_delay = smooth_max_step_delay;
+		return c1;
+	}
+
 	// Calculate current step respecting force changing speed and delay from previous force adjustment
 	float step = amps_per_sec * (float) prev_adjustment_delay / (float) 1000.0;
 
@@ -627,6 +644,7 @@ inline static void smooth_motor_adjustment(const int cur_tac, const int abs_tac)
 			save_custom_msg("%s: -- Wrong smooth motor adjustment target mode: '%s'",
 							state_str(state), motor_mode_str(target_motor_state.mode));
 			next_smooth_motor_adjustment = INT_MAX;
+			smooth_motor_paused = false;
 			return;
 	}
 }
@@ -645,6 +663,7 @@ inline static void smooth_motor_release(void) {
 	current_motor_state = target_motor_state;
 	next_smooth_motor_adjustment = INT_MAX;
 	prev_smooth_motor_adjustment = loop_step;
+	smooth_motor_paused = false;
 }
 
 // Always instantly
@@ -661,6 +680,7 @@ inline static void smooth_motor_speed(const float erpm) {
 	current_motor_state = target_motor_state;
 	next_smooth_motor_adjustment = INT_MAX;
 	prev_smooth_motor_adjustment = loop_step;
+	smooth_motor_paused = false;
 }
 
 inline static void smooth_motor_brake(const int cur_tac, const int abs_tac, const float current) {

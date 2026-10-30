@@ -65,7 +65,7 @@ typedef struct {
 	float antisex_min_pull_amps;        // Activate antisex pull currection if pulling above this only
 	float antisex_reduce_amps;          // Reduce motor amps to this value when antisex is activated
 	float antisex_acceleration_on_mss;  // Activate antisex pull reduce if winding acceleration above this
-	float antisex_acceleration_off_mss; // Deactivate antisex if current acceleration below this
+	float antisex_acceleration_off_mss; // Antisex off threshold; also pauses smooth current decreases below it
 	int antisex_max_period_ms;          // Do not reduce nominal pull more then this milliseconds
 } skypuff_config;
 
