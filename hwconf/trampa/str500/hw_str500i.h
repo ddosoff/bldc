@@ -27,4 +27,7 @@
 
 #include "hw_str500_core.h"
 
+#undef HW_NAME
+#define HW_NAME "STR500I"
+
 #endif /* HW_STR500I_H_ */
