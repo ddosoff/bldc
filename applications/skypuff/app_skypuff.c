@@ -1622,14 +1622,32 @@ static bool brake_or_slowing(const int cur_tac) {
 	return false;
 }
 
-inline static void update_stats_check_faults(void) {
+// Skip normal motor control during a fault and on the first loop after it clears.
+inline static bool update_stats_check_faults(const int cur_tac) {
 	UTILS_LP_FAST(v_in_filtered, GET_INPUT_VOLTAGE() * v_bat_k, 0.1);
 	mc_fault_code f = mc_interface_get_fault();
+	bool had_fault = prev_printed_fault != FAULT_CODE_NONE;
 
 	if (f != prev_printed_fault) {
 		prev_printed_fault = f;
 		save_fault_to_reply_buf(f);
 	}
+
+	if (f != FAULT_CODE_NONE || had_fault) {
+		main_loop_command = DO_NOTHING;
+		if (f == FAULT_CODE_NONE && state != UNINITIALIZED) {
+			// The motor was released by the fault. Brake without resuming the old ramp.
+			state = MANUAL_BRAKING;
+			prev_abs_tac = abs(cur_tac);
+			target_motor_state.mode = MOTOR_BRAKING;
+			target_motor_state.param.current = config.manual_brake_current;
+			smooth_motor_instant_brake();
+			timeout_reset();
+		}
+		return true;
+	}
+
+	return false;
 }
 
 inline static void print_position_periodically(const int cur_tac, const int delay, const char *additional_msg) {
@@ -1678,9 +1696,8 @@ inline static void brake_or_manual_brake(const int cur_tac, const int abs_tac) {
 		manual_brake(cur_tac);
 }
 
-inline static bool is_unwinded_to_opposite_braking_zone(const int cur_tac, const float cur_erpm) {
-	if ((cur_erpm > 0 && cur_tac >= config.braking_length) ||
-		(cur_erpm < 0 && cur_tac <= -config.braking_length)) {
+inline static bool is_unwinded_to_opposite_braking_zone(const int cur_tac) {
+	if (cur_tac >= 4 * config.braking_length) {
 		save_command_only(SK_COMM_UNWINDED_TO_OPPOSITE);
 #ifdef VERBOSE_TERMINAL
 		commands_printf("%s: -- Unwinded to opposite braking zone", state_str(state));
@@ -1890,13 +1907,19 @@ inline static void process_states(const int cur_tac, const int abs_tac) {
 					(double)(cur_current / config.amps_per_kg), (double)cur_current,
 					(double)(config.slow_max_current / config.amps_per_kg), (double)config.slow_max_current);
 #endif
-				brake_or_unwinding(cur_tac, abs_tac);
+				if (cur_tac > 0) {
+					braking(cur_tac);
+					main_loop_command = SET_ZERO;
+				} else {
+					brake_or_unwinding(cur_tac, abs_tac);
+				}
 				break;
 			}
 
 			// Slowly rewinded more then opposite side of braking  zone?
-			if (is_unwinded_to_opposite_braking_zone(cur_tac, cur_erpm)) {
+			if (is_unwinded_to_opposite_braking_zone(cur_tac)) {
 				braking(cur_tac);
+				main_loop_command = SET_ZERO;
 				break;
 			}
 
@@ -2679,6 +2702,11 @@ static THD_FUNCTION(my_thread, arg) {
 
 		int cur_tac = mc_interface_get_tachometer_value(false);
 
+		if (update_stats_check_faults(cur_tac)) {
+			chThdSleepMilliseconds(1);
+			continue;
+		}
+
 		if (measurement_tick(cur_tac))  // Are speed and acceleration updated?
 			antisex_tick();
 
@@ -2696,8 +2724,6 @@ static THD_FUNCTION(my_thread, arg) {
 		// Time to adjust motor?
 		if (loop_step >= next_smooth_motor_adjustment)
 			smooth_motor_adjustment(cur_tac, abs_tac);
-
-		update_stats_check_faults();
 
 		chThdSleepMilliseconds(1);
 	}
