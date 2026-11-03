@@ -47,6 +47,9 @@
 #include "app_skypuff.h"
 #include "skypuff_conf.h"
 
+// High application current ceiling in amps; VESC motor limits still apply.
+#define NO_CURRENT_LIMIT 500.0f
+
 /*
 	This application turns VESC into paragliding winch controller.
 	Some progress here: https://www.youtube.com/watch?v=KoNegc4SzxY
@@ -107,6 +110,7 @@ static void terminal_get_conf(int argc, const char **argv); // Send serialized c
 static void terminal_set_example_conf(int argc, const char **argv);
 static void terminal_alive_forever(int argc, const char **argv);
 static void terminal_set_state(int argc, const char **argv);
+static void terminal_manual_distance(int argc, const char **argv);
 static void terminal_set_pull_force(int argc, const char **argv);
 static void terminal_set_v_bat_k(int argc, const char **argv);
 static void terminal_cut_the_line(int argc, const char **argv);
@@ -135,6 +139,9 @@ static bool alive_forever;		         // if true then alive_until doesnt make sen
 static int state_start_time;			 // Count the duration of state
 static float terminal_pull_kg;			 // Pulling force to set
 static float terminal_v_bat_k;			 // Battery voltage calibration to set
+static float terminal_manual_distance_m; // Distance requested by the terminal
+static float manual_distance_m;          // Manual rewind distance; 0 disables the limit
+static int manual_start_tac;             // Position at the start of manual acceleration
 static int unwinding_start_step;         // loop_step when entering UNWINDING
 
 // Prevent long time oscilations
@@ -195,6 +202,7 @@ typedef enum {
 	SEND_TEMP_STATS,
 	SET_SMOOTH,
 	SET_V_BAT_K,
+	SET_MANUAL_DISTANCE,
 } skypuff_main_loop_command;
 
 static volatile skypuff_main_loop_command main_loop_command;
@@ -292,16 +300,16 @@ static const skypuff_config max_config = {
 		.takeoff_trigger_length = 5000 * 120,
 		.pre_pull_timeout = 5000,				// 5 secs
 		.takeoff_period = 60000,				// 1 min
-		.brake_current = 500,					// Charge battery mode possible
+		.brake_current = NO_CURRENT_LIMIT,		// Charge battery mode possible
 		.slowing_current = 30,					// Do not brake hardly on high unwinding speeds
-		.manual_brake_current = 430,				// High manual braking useful for spool strength tests
+		.manual_brake_current = NO_CURRENT_LIMIT,	// High manual braking useful for spool strength tests
 		.unwinding_current = 50,
 		.unwinding_strong_current = 50,
 		.unwinding_strong_erpm = 50000,
 		.rewinding_current = 100,
 		.slow_max_current = 50,
-		.manual_slow_max_current = 50,
-		.manual_slow_speed_up_current = 50,
+		.manual_slow_max_current = NO_CURRENT_LIMIT,
+		.manual_slow_speed_up_current = NO_CURRENT_LIMIT,
 		.manual_slow_erpm = 40000,
 		.antisex_min_pull_amps = 1000,
 		.antisex_reduce_amps = 100,
@@ -1067,6 +1075,7 @@ inline static void fast_pull(const int cur_tac) {
 }
 
 inline static void manual_slow_speed_up(const int cur_tac) {
+	manual_start_tac = cur_tac;
 	char msg[64];
 	snprintf(msg, 64, ", until: %.1fms (%.0f ERPM)",
 			 (double) erpm_to_ms(config.manual_slow_erpm), (double) config.manual_slow_erpm);
@@ -1079,6 +1088,7 @@ inline static void manual_slow_speed_up(const int cur_tac) {
 }
 
 inline static void manual_slow_back_speed_up(const int cur_tac) {
+	manual_start_tac = cur_tac;
 	char msg[64];
 	snprintf(msg, 64, ", until: %.1fms (%.0f ERPM)",
 			 (double) erpm_to_ms(config.manual_slow_erpm), (double) config.manual_slow_erpm);
@@ -1489,6 +1499,7 @@ void app_custom_start(void) {
 	alive_forever = false;
 	prev_abs_tac = 0;
 	prev_erpm = 0;
+	manual_distance_m = 0;
 	v_in_filtered = GET_INPUT_VOLTAGE() * v_bat_k;
     main_loop_command = DO_NOTHING;
     main_loop_command_from_terminal = true; // Assume we work from terminal by default
@@ -1543,6 +1554,10 @@ void app_custom_start(void) {
 			"Set new SkyPUFF state: MANUAL_BRAKING, UNWINDING, MANUAL_SLOW, MANUAL_SLOW_BACK, PRE_PULL, TAKEOFF_PULL, PULL, FAST_PULL",
 			"state", terminal_set_state);
 	terminal_register_command_callback(
+			"manual_distance",
+			"Rewind limit from speed-up, both directions; 0=off; cleared on SkyPUFF restart",
+			"<meters>", terminal_manual_distance);
+	terminal_register_command_callback(
 			"force",
 			"Set SkyPUFF pull force",
 			"[kg]", terminal_set_pull_force);
@@ -1583,6 +1598,7 @@ void app_custom_stop(void) {
 	terminal_unregister_callback(terminal_set_example_conf);
 	terminal_unregister_callback(terminal_alive_forever);
 	terminal_unregister_callback(terminal_set_state);
+	terminal_unregister_callback(terminal_manual_distance);
 	terminal_unregister_callback(terminal_set_pull_force);
 	terminal_unregister_callback(terminal_set_v_bat_k);
 #ifdef DEBUG_SMOOTH_MOTOR
@@ -1721,6 +1737,17 @@ inline static void slowing_or_speed_up_print(const int cur_tac, const float cur_
 				(double) erpm_to_ms(target_erpm), (double) target_erpm,
 				(double) tac_steps_to_meters(distance_left));
 	}
+}
+
+inline static bool manual_distance_reached(const int cur_tac) {
+	if (manual_distance_m <= 0) {
+		return false;
+	}
+
+	// Measure from the start in either direction, including movement across zero.
+	int64_t steps = (int64_t) cur_tac - manual_start_tac;
+	float distance_m = fabsf((float) steps / steps_per_rev() * meters_per_rev());
+	return distance_m >= manual_distance_m;
 }
 
 // Control loop state machine
@@ -1935,6 +1962,12 @@ inline static void process_states(const int cur_tac, const int abs_tac) {
 #endif
 			break;
 		case MANUAL_SLOW_SPEED_UP:
+			if (manual_distance_reached(cur_tac)) {
+				save_custom_msg("Manual rewind distance reached: %.2f m", (double) manual_distance_m);
+				manual_brake(cur_tac);
+				break;
+			}
+
 			// No system timeouts on this state
 			if (!(loop_step % timeout_reset_interval))
 				timeout_reset();
@@ -1958,6 +1991,12 @@ inline static void process_states(const int cur_tac, const int abs_tac) {
 #endif
 			break;
 		case MANUAL_SLOW_BACK_SPEED_UP:
+			if (manual_distance_reached(cur_tac)) {
+				save_custom_msg("Manual rewind distance reached: %.2f m", (double) manual_distance_m);
+				manual_brake(cur_tac);
+				break;
+			}
+
 			// No system timeouts on this state
 			if (!(loop_step % timeout_reset_interval))
 				timeout_reset();
@@ -1981,6 +2020,12 @@ inline static void process_states(const int cur_tac, const int abs_tac) {
 #endif
 			break;
 		case MANUAL_SLOW:
+			if (manual_distance_reached(cur_tac)) {
+				save_custom_msg("Manual rewind distance reached: %.2f m", (double) manual_distance_m);
+				manual_brake(cur_tac);
+				break;
+			}
+
 			// No system timeouts on this state
 			if (!(loop_step % timeout_reset_interval))
 				timeout_reset();
@@ -2016,6 +2061,12 @@ inline static void process_states(const int cur_tac, const int abs_tac) {
 #endif
 			break;
 		case MANUAL_SLOW_BACK:
+			if (manual_distance_reached(cur_tac)) {
+				save_custom_msg("Manual rewind distance reached: %.2f m", (double) manual_distance_m);
+				manual_brake(cur_tac);
+				break;
+			}
+
 			// No system timeouts on this state
 			if (!(loop_step % timeout_reset_interval))
 				timeout_reset();
@@ -2205,6 +2256,7 @@ inline static void print_conf(const int cur_tac) {
 					(double) config.manual_slow_speed_up_current);
 	commands_printf("  manual slow speed: %.1fms (%.0f ERPM)", (double) erpm_to_ms(config.manual_slow_erpm),
 					(double) config.manual_slow_erpm);
+	commands_printf("  manual rewind distance: %.2f m (0 = disabled)", (double) manual_distance_m);
 
 	commands_printf("  pull force: %.2fkg (%.1fA)", (double) (config.pull_current / config.amps_per_kg),
 					(double) config.pull_current);
@@ -2325,6 +2377,19 @@ inline static void process_terminal_commands(int *cur_tac, int *abs_tac) {
 			}
 			increment_alive_until();
 			send_stats(*cur_tac, false, false);
+			break;
+		case SET_MANUAL_DISTANCE:
+			if (state != UNINITIALIZED && state != BRAKING &&
+				state != BRAKING_EXTENSION && state != MANUAL_BRAKING) {
+				save_custom_msg("Can't set manual distance while moving. Switch to MANUAL_BRAKING first");
+				break;
+			}
+			manual_distance_m = terminal_manual_distance_m;
+			if (manual_distance_m > 0) {
+				save_custom_msg("Manual rewind distance set to %.2f m", (double) manual_distance_m);
+			} else {
+				save_custom_msg("Manual rewind distance limit disabled");
+			}
 			break;
 		case SET_MANUAL_SLOW:
 			switch (state) {
@@ -2792,6 +2857,24 @@ static void terminal_alive_forever(int argc, const char **argv) {
 	(void) argc;
 	(void) argv;
 	alive_forever = true;
+}
+
+static void terminal_manual_distance(int argc, const char **argv) {
+	if (argc != 2) {
+		commands_printf("manual_distance <meters>: from speed-up, both directions; "
+						"0=off; cleared on SkyPUFF restart");
+		return;
+	}
+
+	char *end;
+	float meters = strtof(argv[1], &end);
+	if (end == argv[1] || *end != '\0' || !isfinite(meters) || meters < 0) {
+		commands_printf("Manual distance must be a finite number of meters >= 0");
+		return;
+	}
+
+	terminal_manual_distance_m = meters;
+	main_loop_command = SET_MANUAL_DISTANCE;
 }
 
 static void terminal_set_pull_force(int argc, const char **argv) {
