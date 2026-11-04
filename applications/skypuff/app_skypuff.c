@@ -1084,6 +1084,7 @@ inline static void manual_slow_speed_up(const int cur_tac) {
 	erpm_filtered = config.manual_slow_erpm;
 
 	pull_state(cur_tac, config.manual_slow_speed_up_current, MANUAL_SLOW_SPEED_UP, msg);
+	smooth_motor_instant_current();
 }
 
 inline static void manual_slow_back_speed_up(const int cur_tac) {
@@ -1097,6 +1098,7 @@ inline static void manual_slow_back_speed_up(const int cur_tac) {
 	erpm_filtered = -config.manual_slow_erpm;
 
 	pull_state(cur_tac, -config.manual_slow_speed_up_current, MANUAL_SLOW_BACK_SPEED_UP, msg);
+	smooth_motor_instant_current();
 }
 
 inline static void slowing(const int cur_tac, const float erpm) {
