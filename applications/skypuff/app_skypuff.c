@@ -47,9 +47,6 @@
 #include "app_skypuff.h"
 #include "skypuff_conf.h"
 
-// High application current ceiling in amps; VESC motor limits still apply.
-#define NO_CURRENT_LIMIT 500.0f
-
 /*
 	This application turns VESC into paragliding winch controller.
 	Some progress here: https://www.youtube.com/watch?v=KoNegc4SzxY
@@ -282,6 +279,8 @@ static const skypuff_config min_config = {
 		.max_speed_ms = 5,
 };
 
+enum { no_current_limit = 500 };
+
 static const skypuff_config max_config = {
 		.amps_per_kg = 30,
 		.pull_applying_period = 10000,			// 10 secs
@@ -300,16 +299,16 @@ static const skypuff_config max_config = {
 		.takeoff_trigger_length = 5000 * 120,
 		.pre_pull_timeout = 5000,				// 5 secs
 		.takeoff_period = 60000,				// 1 min
-		.brake_current = NO_CURRENT_LIMIT,		// Charge battery mode possible
+		.brake_current = no_current_limit,	// Charge battery mode possible
 		.slowing_current = 30,					// Do not brake hardly on high unwinding speeds
-		.manual_brake_current = NO_CURRENT_LIMIT,	// High manual braking useful for spool strength tests
+		.manual_brake_current = no_current_limit, // High manual braking useful for spool strength tests
 		.unwinding_current = 50,
 		.unwinding_strong_current = 50,
 		.unwinding_strong_erpm = 50000,
 		.rewinding_current = 100,
 		.slow_max_current = 50,
-		.manual_slow_max_current = NO_CURRENT_LIMIT,
-		.manual_slow_speed_up_current = NO_CURRENT_LIMIT,
+		.manual_slow_max_current = no_current_limit,
+		.manual_slow_speed_up_current = no_current_limit,
 		.manual_slow_erpm = 40000,
 		.antisex_min_pull_amps = 1000,
 		.antisex_reduce_amps = 100,
