@@ -1493,6 +1493,8 @@ void app_custom_start(void) {
 
 	// Static variables initial state
 	timeout_reset_interval = app_get_configuration()->timeout_msec / 2;
+	if (timeout_reset_interval < 1)
+		timeout_reset_interval = 1;
 	prev_print = INT_MIN / 2;
 	prev_printed_tac = INT_MIN / 2;
 	prev_printed_fault = FAULT_CODE_NONE;
@@ -1783,12 +1785,12 @@ inline static void process_states(const int cur_tac, const int abs_tac) {
 				break;
 			}
 
-			// Timeout thread will remove braking every second by default
-			// Apply brake again if position changed
-			if (timeout_has_timeout() && abs_tac != prev_abs_tac)
+			if (mc_interface_get_state() == MC_STATE_OFF)
 				braking(cur_tac);
-			else
-				prev_abs_tac = abs_tac;
+
+			// No system timeouts on this state
+			if (!(loop_step % timeout_reset_interval))
+				timeout_reset();
 
 #ifdef VERBOSE_TERMINAL
 			print_position_periodically(cur_tac, long_print_delay, "");
@@ -1806,25 +1808,27 @@ inline static void process_states(const int cur_tac, const int abs_tac) {
 				config.braking_length) //todo is it legit to switch to braking_extension with positive tachometer?
 			{
 				braking(cur_tac);
+				break;
 			}
 
-			// Timeout thread will remove braking every second by default
-			// Apply brake again if position changed
-			if (timeout_has_timeout() && abs_tac != prev_abs_tac)
+			if (mc_interface_get_state() == MC_STATE_OFF)
 				braking_extension(cur_tac);
-			else
-				prev_abs_tac = abs_tac;
+
+			// No system timeouts on this state
+			if (!(loop_step % timeout_reset_interval))
+				timeout_reset();
 
 #ifdef VERBOSE_TERMINAL
 			print_position_periodically(cur_tac, long_print_delay, "");
 #endif
 			break;
 		case MANUAL_BRAKING:
-			// Apply brake again on timeout and position change
-			if (timeout_has_timeout() && abs_tac != prev_abs_tac)
+			if (mc_interface_get_state() == MC_STATE_OFF)
 				manual_brake(cur_tac);
-			else
-				prev_abs_tac = abs_tac;
+
+			// No system timeouts on this state
+			if (!(loop_step % timeout_reset_interval))
+				timeout_reset();
 
 #ifdef VERBOSE_TERMINAL
 			print_position_periodically(cur_tac, long_print_delay,
